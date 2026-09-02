@@ -7,7 +7,7 @@ import type { TSchema } from "typebox";
 import { showStatus, showTools, showPrompts, reconnectServer, reconnectServers, authenticateServer, logoutServer, manageBearerToken, openMcpAuthPanel, openMcpPanel, openMcpSetup } from "./commands.ts";
 import { cloneMcpConfig, loadMcpConfig, writeProjectServerDisabledOverride } from "./config.ts";
 import { buildProxyDescription, createDirectToolExecutor, getMissingConfiguredDirectToolServers, prepareDirectToolArguments, resolveDirectTools } from "./direct-tools.ts";
-import { flushMetadataCache, initializeMcp, updateStatusBar } from "./init.ts";
+import { flushMetadataCache, initializeMcp, lazyConnect, updateStatusBar } from "./init.ts";
 import { isServerInActiveFailureBackoff } from "./failure-backoff.ts";
 import { loadMetadataCache, parseDirectToolSelectors, type MetadataCache } from "./metadata-cache.ts";
 import { createPromptCommand, resolveCachedPrompts } from "./prompts.ts";
@@ -162,6 +162,19 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       return isAbortError(error);
     }
     return true;
+  }
+
+  function hasDirectToolOptIn(definition: ServerEntry): boolean {
+    return definition.directTools === true ||
+      (Array.isArray(definition.directTools) && definition.directTools.length > 0);
+  }
+
+  function autoConnectRuntimeDirectTools(targetState: McpExtensionState, name: string): void {
+    void lazyConnect(targetState, name).catch(error => {
+      if (isAbortError(error, targetState.owner.signal)) return;
+      const message = error instanceof Error ? error.message : String(error);
+      logger.debug(`MCP: runtime direct-tool connect failed for ${name}: ${message}`);
+    });
   }
 
   function startGatewayRetryInitialization(ctx: ExtensionContext): void {
@@ -466,6 +479,9 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       attachRuntimeServerLifecycle(registeredState, name, entry);
       syncToolSurface();
       updateStatusBar(registeredState);
+      if (hasDirectToolOptIn(entry)) {
+        autoConnectRuntimeDirectTools(registeredState, name);
+      }
     }
     let disposed = false;
     return {
@@ -572,6 +588,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
 
       state = nextState;
       clearRetainedInitFailure();
+      const runtimeDirectServers: string[] = [];
       for (const [name, { entry }] of runtimeServers) {
         if (Object.hasOwn(nextState.config.mcpServers, name)) {
           console.error(`MCP: runtime-registered server "${name}" now collides with a configured server; keeping the configured server`);
@@ -579,6 +596,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         }
         nextState.config.mcpServers[name] = entry;
         attachRuntimeServerLifecycle(nextState, name, entry);
+        if (hasDirectToolOptIn(entry)) runtimeDirectServers.push(name);
       }
       nextState.onToolMetadataUpdated = (_serverName, _reason) => {
         if (state !== nextState || !owner.isActive()) return;
@@ -591,6 +609,9 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       };
       syncPromptCommands();
       syncToolSurface(ctx);
+      for (const name of runtimeDirectServers) {
+        autoConnectRuntimeDirectTools(nextState, name);
+      }
       // A connected snapshot is readiness-like external state. Publish it only
       // after Pi's model-facing direct-tool surface reflects live metadata.
       nextState.statusEvents = pi.events;

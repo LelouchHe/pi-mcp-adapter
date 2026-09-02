@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   initializeMcp: vi.fn(),
+  lazyConnect: vi.fn(),
   updateStatusBar: vi.fn(),
   flushMetadataCache: vi.fn(),
   notifyToolMetadataUpdated: vi.fn(),
@@ -44,6 +45,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../init.ts", () => ({
   initializeMcp: mocks.initializeMcp,
+  lazyConnect: mocks.lazyConnect,
   updateStatusBar: mocks.updateStatusBar,
   flushMetadataCache: mocks.flushMetadataCache,
   notifyToolMetadataUpdated: mocks.notifyToolMetadataUpdated,
@@ -183,6 +185,7 @@ describe("runtime MCP server registration", () => {
       if (typeof value === "function" && "mockReset" in value) value.mockReset();
     }
     mocks.initializeOAuth.mockResolvedValue(undefined);
+    mocks.lazyConnect.mockResolvedValue(true);
     mocks.createOAuthRuntime.mockImplementation((signal: AbortSignal) => ({ signal }));
     mocks.shutdownOAuth.mockResolvedValue(undefined);
     mocks.loadMcpConfig.mockReturnValue({ mcpServers: {} });
@@ -368,6 +371,7 @@ describe("runtime MCP server registration", () => {
       expect.objectContaining({ url: "https://example.test/mcp" }),
       undefined,
     );
+    expect(mocks.lazyConnect).not.toHaveBeenCalled();
 
     await registration.dispose();
     expect(state.config.mcpServers["plugin-a"]).toBeUndefined();
@@ -411,6 +415,7 @@ describe("runtime MCP server registration", () => {
       url: "https://direct.test/mcp",
       directTools: true,
     });
+    expect(mocks.lazyConnect).toHaveBeenCalledWith(state, "plugin-direct");
     expect(api.registerTool).toHaveBeenCalledWith(
       expect.objectContaining({ name: "plugin-direct_echo" }),
     );
@@ -445,7 +450,11 @@ describe("runtime MCP server registration", () => {
     const { api, handlers } = createPi();
     mcpAdapter(api);
 
-    registerMcpServer({ pi: api, name: "early-plugin", definition: { url: "https://early.test/mcp" } });
+    registerMcpServer({
+      pi: api,
+      name: "early-plugin",
+      definition: { url: "https://early.test/mcp", directTools: true },
+    });
     expect(() => getRuntimeMcpServerSnapshot({ pi: api, name: "early-plugin" }))
       .toThrow('MCP runtime server "early-plugin" is unavailable because the adapter has no active state');
 
@@ -454,8 +463,9 @@ describe("runtime MCP server registration", () => {
 
     expect(state.config.mcpServers["early-plugin"]).toMatchObject({
       url: "https://early.test/mcp",
-      directTools: false,
+      directTools: true,
     });
+    expect(mocks.lazyConnect).toHaveBeenCalledWith(state, "early-plugin");
     expect(getRuntimeMcpServerSnapshot({ pi: api, name: "early-plugin" })).toMatchObject({
       name: "early-plugin",
       definition: { url: "https://early.test/mcp" },
