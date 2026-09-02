@@ -11,7 +11,15 @@ async function extractPackedPackage(fixtureRoot) {
     encoding: "utf8"
   });
   assert.equal(packed.status, 0, `${packed.stdout}\n${packed.stderr}`);
-  const tarball = path.join(fixtureRoot, JSON.parse(packed.stdout)[0].filename);
+  const packResult = JSON.parse(packed.stdout);
+  // npm <=11 returns an array; npm 12 returns an object keyed by package
+  // name. Accept both shapes because this test is about the packed artifact,
+  // not npm's reporting format.
+  const packInfo = Array.isArray(packResult)
+    ? packResult[0]
+    : packResult["pi-mcp-adapter"];
+  assert.equal(typeof packInfo?.filename, "string", `unexpected npm pack output: ${packed.stdout}`);
+  const tarball = path.join(fixtureRoot, packInfo.filename);
   const packageRoot = path.join(fixtureRoot, "node_modules", "pi-mcp-adapter");
   await mkdir(packageRoot, { recursive: true });
   const extracted = spawnSync("tar", ["-xzf", tarball, "-C", packageRoot, "--strip-components=1"], {
