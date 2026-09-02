@@ -447,10 +447,18 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     if (runtimeServers.has(name) || Object.hasOwn(effective.mcpServers, name)) {
       throw new Error(`MCP server "${name}" is already registered`);
     }
-    // Runtime-registered servers are proxy-tool-only: direct tools are frozen
-    // at startup and must not be rebuilt for late registrations.
+    // Runtime-registered servers default to proxy-tool-only (direct tools are
+    // frozen at startup and must not be rebuilt for late registrations), but a
+    // definition that explicitly opts into `directTools` is honored so
+    // session-scoped control-plane servers can appear in the agent's native
+    // tool surface (e.g. WebAgent Task Server). The value is copied from the
+    // registration definition and defaults to false for backward compatibility.
     const snapshotDefinition = structuredClone(definition);
-    const entry: ServerEntry = { ...structuredClone(snapshotDefinition), directTools: false };
+    const directTools: boolean | string[] = snapshotDefinition.directTools ?? false;
+    const entry: ServerEntry = {
+      ...structuredClone(snapshotDefinition),
+      directTools,
+    };
     runtimeServers.set(name, { definition: snapshotDefinition, entry });
     const registeredState = state;
     if (registeredState) {

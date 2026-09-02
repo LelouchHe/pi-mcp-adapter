@@ -308,7 +308,7 @@ describe("runtime MCP server registration", () => {
 
     const first = getRuntimeMcpServerSnapshot({ pi: api, name: "snapshot" });
     expect(first).toEqual({ name: "snapshot", definition, runtime: true, persisted: false });
-    expect(state.config.mcpServers["snapshot"]).toMatchObject({ directTools: false });
+    expect(state.config.mcpServers["snapshot"]).toMatchObject({ directTools: ["search"] });
     expect(first.definition).not.toBe(definition);
     first.definition.headers!.Authorization = "Bearer changed";
 
@@ -377,6 +377,45 @@ describe("runtime MCP server registration", () => {
     // Dispose is idempotent.
     await registration.dispose();
     expect(state.manager.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("promotes a runtime registration with directTools into the native tool surface", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    mocks.resolveDirectTools.mockImplementation((config: any) =>
+      config.mcpServers["plugin-direct"]?.directTools === true
+        ? [
+            {
+              serverName: "plugin-direct",
+              originalName: "echo",
+              prefixedName: "plugin-direct_echo",
+              description: "Echo",
+              inputSchema: { type: "object" },
+            },
+          ]
+        : [],
+    );
+    const { default: mcpAdapter, registerMcpServer } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await settle();
+
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-direct",
+      definition: { url: "https://direct.test/mcp", directTools: true },
+    });
+
+    expect(state.config.mcpServers["plugin-direct"]).toMatchObject({
+      url: "https://direct.test/mcp",
+      directTools: true,
+    });
+    expect(api.registerTool).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "plugin-direct_echo" }),
+    );
+
+    await registration.dispose();
   });
 
   it("fails closed on duplicate names against config and other registrations", async () => {
