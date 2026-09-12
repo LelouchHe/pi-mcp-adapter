@@ -2,7 +2,7 @@
 
 This fork is maintained at [`LelouchHe/pi-mcp-adapter`](https://github.com/LelouchHe/pi-mcp-adapter), based on the upstream [`nicobailon/pi-mcp-adapter`](https://github.com/nicobailon/pi-mcp-adapter). It adds behavior needed by session-scoped ACP integrations such as WebAgent:
 
-- Runtime-registered MCP servers remain proxy-only by default, preserving upstream behavior, but an explicit `directTools: true` or non-empty `directTools` tool-name list is preserved and promoted into Pi's native tool surface.
+- Runtime-registered MCP servers remain proxy-only by default, preserving upstream behavior, but an explicit `directTools: true`, `directTools: "search"`, or non-empty `directTools` tool-name list is preserved and promoted into Pi's native tool surface. Search mode counts as an opt-in because its tools only become reachable through `mcp({ search })`, which reads live metadata.
 - Runtime registrations that opt into direct tools automatically connect through the existing lazy-connect and metadata-refresh path. The server runs `tools/list`, updates the metadata cache, and hot-loads direct tools without requiring the user or agent to run `/mcp reconnect`.
 - The automatic connection applies both when a runtime registration arrives after adapter initialization and when it was queued before initialization completes. Ordinary runtime registrations without direct-tool opt-in remain lazy.
 - The public-export test accepts both the array-shaped `npm pack --json` output used by older npm releases and the package-keyed object shape emitted by npm 12.

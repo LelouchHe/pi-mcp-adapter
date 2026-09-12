@@ -427,6 +427,49 @@ describe("runtime MCP server registration", () => {
     await registration.dispose();
   });
 
+  it("auto-connects a runtime registration that selects directTools search mode", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    mocks.resolveDirectTools.mockImplementation((config: any) =>
+      config.mcpServers["plugin-search"]?.directTools === "search"
+        ? [
+            {
+              serverName: "plugin-search",
+              originalName: "find",
+              prefixedName: "plugin-search_find",
+              description: "Find",
+              inputSchema: { type: "object" },
+            },
+          ]
+        : [],
+    );
+    const { default: mcpAdapter, registerMcpServer } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await settle();
+
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-search",
+      definition: { url: "https://search.test/mcp", directTools: "search" },
+    });
+
+    // Search-mode tools are only reachable through mcp({ search }), which reads
+    // live metadata, so the mode survives the runtime direct-tools default and
+    // still has to connect.
+    expect(state.config.mcpServers["plugin-search"]).toMatchObject({
+      url: "https://search.test/mcp",
+      directTools: "search",
+    });
+    expect(mocks.lazyConnect).toHaveBeenCalledWith(state, "plugin-search");
+    expect(api.registerTool).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "plugin-search_find" }),
+    );
+
+    await registration.dispose();
+  });
+
   it("fails closed on duplicate names against config and other registrations", async () => {
     mocks.loadMcpConfig.mockReturnValue({
       mcpServers: { configured: { url: "https://configured.test/mcp" } },

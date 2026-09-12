@@ -187,6 +187,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
 
   function hasDirectToolOptIn(definition: ServerEntry): boolean {
     return definition.directTools === true ||
+      definition.directTools === "search" ||
       (Array.isArray(definition.directTools) && definition.directTools.length > 0);
   }
 
@@ -591,7 +592,9 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     // definition that explicitly opts into `directTools` is honored so
     // session-scoped control-plane servers can appear in the agent's native
     // tool surface (e.g. WebAgent Task Server). The value is copied from the
-    // registration definition and defaults to false for backward compatibility.
+    // registration definition and defaults to false for backward compatibility;
+    // `"search"` counts as an opt-in because those tools are only reachable
+    // through mcp({ search }), which reads live metadata.
     const snapshotDefinition = structuredClone(definition);
     const directTools: ServerEntry["directTools"] = snapshotDefinition.directTools ?? false;
     const entry: ServerEntry = {
