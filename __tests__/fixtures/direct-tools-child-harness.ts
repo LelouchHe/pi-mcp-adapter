@@ -10,9 +10,19 @@ const configPath = process.env.MCP_CHILD_CONFIG;
 const projectDir = process.env.MCP_CHILD_PROJECT_DIR;
 const adapterPath = process.env.MCP_CHILD_ADAPTER_PATH;
 const probePath = process.env.MCP_CHILD_PROBE_PATH;
-if (!agentDir || !configPath || !projectDir || !adapterPath || !probePath) {
+const runtimeProbePath = process.env.MCP_CHILD_RUNTIME_PROBE_PATH;
+if (!agentDir || !configPath || !projectDir || !adapterPath) {
   throw new Error("Missing direct-tool child harness environment");
 }
+const extensionPaths = [
+  adapterPath,
+  ...(probePath ? [probePath] : []),
+  ...(runtimeProbePath ? [runtimeProbePath] : []),
+];
+const tools = (process.env.MCP_CHILD_TOOLS ?? "demo_reload_identity")
+  .split(",")
+  .map(name => name.trim())
+  .filter(name => name.length > 0);
 
 process.argv.push("--mcp-config", configPath);
 const settingsManager = SettingsManager.inMemory();
@@ -20,7 +30,7 @@ const loader = new DefaultResourceLoader({
   cwd: projectDir,
   agentDir,
   settingsManager,
-  additionalExtensionPaths: [adapterPath, probePath],
+  additionalExtensionPaths: extensionPaths,
 });
 await loader.reload();
 const { session } = await createAgentSession({
@@ -29,7 +39,7 @@ const { session } = await createAgentSession({
   resourceLoader: loader,
   sessionManager: SessionManager.inMemory(projectDir),
   settingsManager,
-  tools: ["demo_reload_identity"],
+  tools,
 });
 await session.bindExtensions({ mode: "print", onError: error => console.error(error.error) });
 

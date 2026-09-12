@@ -11,6 +11,9 @@ if (pidPath) {
   await writeFile(pendingPath, JSON.stringify(identity));
   await rename(pendingPath, pidPath);
 }
+// Lets a test hold MCP initialization open by delaying the handshake.
+const startupDelayMs = Number(process.env.MCP_FIXTURE_STARTUP_DELAY_MS ?? "0");
+if (startupDelayMs > 0) await new Promise(resolve => setTimeout(resolve, startupDelayMs));
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => process.exit(0));
 }
