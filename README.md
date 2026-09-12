@@ -11,6 +11,26 @@ This fork is maintained at [`LelouchHe/pi-mcp-adapter`](https://github.com/Lelou
 
 These changes are intentionally kept in the adapter fork rather than the WebAgent repository. The WebAgent/pi-acp integration passes the direct-tool opt-in through the ACP session MCP definition; this adapter is responsible for connecting and materializing the resulting Pi tools.
 
+### Installing this fork
+
+This fork is not published to npm, so install it from a checkout:
+
+```bash
+git clone https://github.com/LelouchHe/pi-mcp-adapter.git
+cd pi-mcp-adapter
+npm ci
+```
+
+`npm ci` resolves the MCP SDK preview builds that upstream pins to `pkg.pr.new`; because npm 12 blocks URL dependencies by default, this fork checks in an `.npmrc` that grants `allow-remote`. Nothing else is relaxed — install-time lifecycle scripts stay blocked and git sources stay disabled.
+
+Register the checkout with Pi instead of installing the published package:
+
+```bash
+pi install /absolute/path/to/pi-mcp-adapter
+```
+
+Pi resolves a local path in place and does not install dependencies for it, so the checkout's `node_modules` must stay where it is. The `## Install` section further down documents upstream's published package, which does not include the behavior listed above.
+
 <p>
   <img src="banner.png" alt="pi-mcp-adapter" width="1100">
 </p>
