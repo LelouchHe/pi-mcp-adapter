@@ -12,6 +12,7 @@ export interface McpServerStatusSnapshot {
     readonly name: string;
     readonly status: McpServerRuntimeStatus;
     readonly toolCount: number;
+    readonly directToolCount: number;
     readonly resourceCount?: number;
     readonly failedAgoSeconds?: number;
     readonly disabled: boolean;
@@ -44,6 +45,7 @@ export interface McpTool {
     title?: SdkTool["title"];
     description?: SdkTool["description"];
     inputSchema?: SdkTool["inputSchema"];
+    outputSchema?: SdkTool["outputSchema"];
     _meta?: SdkTool["_meta"];
 }
 export interface McpResource {
@@ -235,7 +237,7 @@ export interface OAuthConfig {
     scope?: string;
     /** Extra authorization URL parameters for provider-specific extensions. Flow-owned parameters cannot be overridden. */
     authorizationParams?: Record<string, string>;
-    /** Exact authorization-code redirect URI for pre-registered clients. HTTPS redirects use manual callback URL completion. */
+    /** Authorization-code redirect URI. Loopback URIs may use `{port}` for an OS-assigned port; HTTPS redirects use manual completion. */
     redirectUri?: string;
     /** Client display name for dynamic registration */
     clientName?: string;
@@ -266,8 +268,12 @@ export interface ServerEntry {
     /** Explicit rmcp-mux Unix-domain socket path. Mutually exclusive with command and url. */
     socket?: string;
     env?: Record<string, string>;
+    /** Inherit the adapter process environment for stdio servers. Defaults to true; false keeps SDK platform defaults plus explicit env overlays. */
+    inheritEnv?: boolean;
     cwd?: string;
     url?: string;
+    /** PEM CA bundle replacing default roots for this HTTPS MCP origin only. */
+    caFile?: string;
     headers?: Record<string, string>;
     /** Add or replace HTTP headers by running a trusted command for each request. */
     requestHeadersCommand?: HttpRequestHeadersCommand;
@@ -293,7 +299,7 @@ export interface ServerEntry {
     idleTimeout?: number;
     requestTimeoutMs?: number;
     exposeResources?: boolean;
-    directTools?: boolean | string[];
+    directTools?: boolean | string[] | "search";
     toolPrefix?: ToolPrefix;
     includeTools?: string[];
     excludeTools?: string[];
@@ -335,6 +341,7 @@ export interface McpOutputGuardSettings {
     detailsMaxBytes?: number;
 }
 export type ToolPrefix = "server" | "none" | "short" | "mcp";
+export declare function formatServerNamespace(serverName: string): string;
 export type HostConfigDiscovery = "off" | "prompt" | "on";
 export type McpFooterStatus = "full" | "compact" | "off";
 export interface McpTraceSettings {
@@ -371,11 +378,13 @@ export interface McpSettings {
     notifyOnStartupConnect?: boolean;
     /** Discover detected host-specific MCP configs only when explicitly enabled. */
     hostConfigDiscovery?: HostConfigDiscovery;
+    /** Trusted HOME-contained roots from which to discover ancestor project configs. */
+    ancestorConfigRoots?: string[];
     /** Agent Plugin package directories to load MCP servers from. */
     agentPluginPaths?: string[];
     idleTimeout?: number;
     requestTimeoutMs?: number;
-    directTools?: boolean;
+    directTools?: boolean | "search";
     /**
      * Validate direct-tool inputs against the advertised schema after recovering
      * one JSON string layer for object and array properties. Defaults to false.
@@ -435,10 +444,19 @@ export interface McpSettings {
      */
     oauthDir?: string;
 }
+export interface ClaudePluginConfig {
+    /** Explicit local Claude plugin directory. File-based config resolves relative paths from the active project cwd; createMcpAdapter snapshots programmatic paths against process.cwd(). */
+    path: string;
+    /** Load the plugin's root .mcp.json as low-precedence MCP defaults. */
+    mcp?: boolean;
+    /** Expose the plugin's root skills/ directory to Pi resource discovery. */
+    skills?: boolean;
+}
 export interface McpConfig {
     mcpServers: Record<string, ServerEntry>;
     imports?: ImportKind[];
     settings?: McpSettings;
+    claudePlugins?: ClaudePluginConfig[];
 }
 export interface McpAdapterOptions {
     config?: McpConfig;
@@ -453,6 +471,7 @@ export interface ToolMetadata {
     uiResourceUri?: string;
     uiVisibility?: UiToolVisibility[];
     inputSchema?: unknown;
+    outputSchema?: unknown;
     uiStreamMode?: UiStreamMode;
 }
 export interface PromptMetadata {
@@ -464,6 +483,8 @@ export interface PromptMetadata {
     arguments: McpPromptArgument[];
 }
 export interface DirectToolSpec {
+    /** Registered inactive; `mcp({ search })` activates it (directTools: "search"). */
+    lazy?: boolean;
     serverName: string;
     originalName: string;
     prefixedName: string;
@@ -486,6 +507,7 @@ export interface CachedTool {
     name: string;
     description?: string;
     inputSchema?: unknown;
+    outputSchema?: unknown;
     uiResourceUri?: string;
     uiVisibility?: UiToolVisibility[];
     uiStreamMode?: "eager" | "stream-first";

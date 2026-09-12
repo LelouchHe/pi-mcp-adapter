@@ -10,6 +10,7 @@ import type {
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai";
 import type { UiStreamMode, UiStreamSummary } from "./ui-stream-types.ts";
 import type { UiToolVisibility } from "./ui-tool-visibility.ts";
+import { createHash } from "node:crypto";
 
 export type Transport = McpTransport;
 
@@ -38,6 +39,7 @@ export interface McpServerStatusSnapshot {
   readonly name: string;
   readonly status: McpServerRuntimeStatus;
   readonly toolCount: number;
+  readonly directToolCount: number;
   readonly resourceCount?: number;
   readonly failedAgoSeconds?: number;
   readonly disabled: boolean;
@@ -85,6 +87,7 @@ export interface McpTool {
   title?: SdkTool["title"];
   description?: SdkTool["description"];
   inputSchema?: SdkTool["inputSchema"]; // JSON Schema
+  outputSchema?: SdkTool["outputSchema"]; // JSON Schema for structuredContent
   _meta?: SdkTool["_meta"];
 }
 
@@ -392,7 +395,7 @@ export interface OAuthConfig {
   scope?: string;
   /** Extra authorization URL parameters for provider-specific extensions. Flow-owned parameters cannot be overridden. */
   authorizationParams?: Record<string, string>;
-  /** Exact authorization-code redirect URI for pre-registered clients. HTTPS redirects use manual callback URL completion. */
+  /** Authorization-code redirect URI. Loopback URIs may use `{port}` for an OS-assigned port; HTTPS redirects use manual completion. */
   redirectUri?: string;
   /** Client display name for dynamic registration */
   clientName?: string;
@@ -426,9 +429,13 @@ export interface ServerEntry {
   /** Explicit rmcp-mux Unix-domain socket path. Mutually exclusive with command and url. */
   socket?: string;
   env?: Record<string, string>;
+  /** Inherit the adapter process environment for stdio servers. Defaults to true; false keeps SDK platform defaults plus explicit env overlays. */
+  inheritEnv?: boolean;
   cwd?: string;
   // HTTP fields
   url?: string;
+  /** PEM CA bundle replacing default roots for this HTTPS MCP origin only. */
+  caFile?: string;
   headers?: Record<string, string>;
   /** Add or replace HTTP headers by running a trusted command for each request. */
   requestHeadersCommand?: HttpRequestHeadersCommand;
@@ -456,7 +463,7 @@ export interface ServerEntry {
   // Resource handling
   exposeResources?: boolean;
   // Direct tool registration
-  directTools?: boolean | string[];
+  directTools?: boolean | string[] | "search";
   // Override settings.toolPrefix for this server.
   toolPrefix?: ToolPrefix;
   // Include/exclude specific MCP tools/resources by original or prefixed name
@@ -510,6 +517,32 @@ export interface McpOutputGuardSettings {
 
 // Settings
 export type ToolPrefix = "server" | "none" | "short" | "mcp";
+
+const ENCODED_SERVER_NAMESPACE_MARKER = "_mcpns_";
+// Provider tool-name limit (64 for Bedrock, Anthropic, OpenAI) minus the `mcp__` proxy prefix.
+const MAX_SERVER_NAMESPACE_LENGTH = 59;
+
+export function formatServerNamespace(serverName: string): string {
+  const normalized = serverName.replace(/-/g, "_");
+  const safe = /^[A-Za-z0-9_]*$/.test(normalized) && !normalized.startsWith(ENCODED_SERVER_NAMESPACE_MARKER);
+  const body = safe ? normalized : encodeServerNamespace(normalized);
+  const namespace = safe ? body : `${ENCODED_SERVER_NAMESPACE_MARKER}${body}`;
+  if (namespace.length <= MAX_SERVER_NAMESPACE_LENGTH) return namespace;
+  // Hash the ASCII encoding, not the raw name: lone surrogates and U+FFFD share UTF-8 bytes.
+  const digest = createHash("sha256").update(namespace, "utf8").digest("hex").slice(0, 16);
+  // `_h_` cannot start an encoded body: `h` is neither `_` nor a hexadecimal digit.
+  const hashPrefix = `${ENCODED_SERVER_NAMESPACE_MARKER}_h_`;
+  const head = body.slice(0, MAX_SERVER_NAMESPACE_LENGTH - hashPrefix.length - digest.length - 1);
+  return `${hashPrefix}${head}_${digest}`;
+}
+
+// `_` becomes `__`, so `__` and `_<hex>_` form a prefix code and the encoding stays injective.
+function encodeServerNamespace(name: string): string {
+  return Array.from(name, character => {
+    if (character === "_") return "__";
+    return /^[A-Za-z0-9]$/.test(character) ? character : `_${character.codePointAt(0)!.toString(16)}_`;
+  }).join("");
+}
 export type HostConfigDiscovery = "off" | "prompt" | "on";
 export type McpFooterStatus = "full" | "compact" | "off";
 
@@ -551,11 +584,13 @@ export interface McpSettings {
   notifyOnStartupConnect?: boolean;
   /** Discover detected host-specific MCP configs only when explicitly enabled. */
   hostConfigDiscovery?: HostConfigDiscovery;
+  /** Trusted HOME-contained roots from which to discover ancestor project configs. */
+  ancestorConfigRoots?: string[];
   /** Agent Plugin package directories to load MCP servers from. */
   agentPluginPaths?: string[];
   idleTimeout?: number; // minutes, default 10, 0 to disable
   requestTimeoutMs?: number; // milliseconds, overrides the SDK request timeout when > 0
-  directTools?: boolean;
+  directTools?: boolean | "search";
   /**
    * Validate direct-tool inputs against the advertised schema after recovering
    * one JSON string layer for object and array properties. Defaults to false.
@@ -616,11 +651,21 @@ export interface McpSettings {
   oauthDir?: string;
 }
 
+export interface ClaudePluginConfig {
+  /** Explicit local Claude plugin directory. File-based config resolves relative paths from the active project cwd; createMcpAdapter snapshots programmatic paths against process.cwd(). */
+  path: string;
+  /** Load the plugin's root .mcp.json as low-precedence MCP defaults. */
+  mcp?: boolean;
+  /** Expose the plugin's root skills/ directory to Pi resource discovery. */
+  skills?: boolean;
+}
+
 // Root config
 export interface McpConfig {
   mcpServers: Record<string, ServerEntry>;
   imports?: ImportKind[];
   settings?: McpSettings;
+  claudePlugins?: ClaudePluginConfig[];
 }
 
 export interface McpAdapterOptions {
@@ -639,6 +684,7 @@ export interface ToolMetadata {
   uiResourceUri?: string; // For app-enabled tools: the UI resource URI
   uiVisibility?: UiToolVisibility[];
   inputSchema?: unknown;  // JSON Schema for parameters (stored for describe/errors)
+  outputSchema?: unknown; // Server schema for structuredContent (stored for describe)
   uiStreamMode?: UiStreamMode;
 }
 
@@ -652,6 +698,8 @@ export interface PromptMetadata {
 }
 
 export interface DirectToolSpec {
+  /** Registered inactive; `mcp({ search })` activates it (directTools: "search"). */
+  lazy?: boolean;
   serverName: string;
   originalName: string;
   prefixedName: string;
@@ -677,6 +725,7 @@ export interface CachedTool {
   name: string;
   description?: string;
   inputSchema?: unknown;
+  outputSchema?: unknown;
   uiResourceUri?: string;
   uiVisibility?: UiToolVisibility[];
   uiStreamMode?: "eager" | "stream-first";

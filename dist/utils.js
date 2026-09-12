@@ -1,6 +1,19 @@
 import { spawnSync } from "node:child_process";
 import { homedir, platform } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
+import stripJsonComments from "strip-json-comments";
+export function parseJsonWithComments(raw) {
+    return JSON.parse(stripJsonComments(raw, { trailingCommas: true }));
+}
+export function stableStringify(value) {
+    if (value === null || typeof value !== "object")
+        return JSON.stringify(value) ?? "undefined";
+    if (Array.isArray(value)) {
+        return `[${value.map(item => stableStringify(item)).join(",")}]`;
+    }
+    const object = value;
+    return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${stableStringify(object[key])}`).join(",")}}`;
+}
 async function execOpen(pi, target, browser, signal) {
     const os = platform();
     if (os === "darwin") {
@@ -51,11 +64,29 @@ export async function parallelLimit(items, limit, fn) {
     return results;
 }
 export function getConfigPathFromArgv() {
-    const idx = process.argv.indexOf("--mcp-config");
-    if (idx >= 0 && idx + 1 < process.argv.length) {
-        return process.argv[idx + 1];
+    let configPath;
+    for (let index = 2; index < process.argv.length; index++) {
+        const arg = process.argv[index];
+        if (arg === undefined)
+            continue;
+        if (arg === "--")
+            break;
+        if (arg === "--mcp-config") {
+            const value = process.argv[index + 1];
+            if (value !== undefined && !value.startsWith("-") && !value.startsWith("@")) {
+                configPath = value;
+                index++;
+            }
+            else {
+                configPath = undefined;
+            }
+            continue;
+        }
+        if (arg.startsWith("--mcp-config=")) {
+            configPath = arg.slice("--mcp-config=".length);
+        }
     }
-    return undefined;
+    return configPath;
 }
 export function interpolateEnvVars(value, environment = process.env) {
     return value
@@ -63,7 +94,7 @@ export function interpolateEnvVars(value, environment = process.env) {
         .replace(/\$env:(\w+)/g, (_, name) => environment[name] ?? "")
         .replace(/\{env:(\w+)\}/g, (_, name) => environment[name] ?? "");
 }
-function getMissingEnvVars(value, environment) {
+export function getMissingEnvVars(value, environment = process.env) {
     const missing = new Set();
     for (const match of value.matchAll(/\$\{(\w+)\}|\$env:(\w+)|\{env:(\w+)\}/g)) {
         const name = match[1] ?? match[2] ?? match[3];

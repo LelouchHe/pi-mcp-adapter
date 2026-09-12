@@ -7,7 +7,9 @@
 
 import {
   UnauthorizedError,
+  type FetchLike,
   type AddClientAuthentication,
+  type AuthResult,
   type OAuthClientInformationContext,
   type OAuthClientProvider,
   type OAuthDiscoveryState,
@@ -21,17 +23,24 @@ import {
   getAuthForUrl,
   updateTokens,
   updateClientInfo,
+  saveAuthEntry,
   clearAllCredentials,
   clearCodeVerifier,
   invalidateAuthEntryCache,
+  withAuthEntryTransaction,
   type AuthEntry,
   type AuthStorageOptions,
   type StoredTokens,
   type StoredClientInfo,
 } from "./mcp-auth.ts"
 import { OAuthMetadataSchema, OpenIdProviderDiscoveryMetadataSchema } from "@modelcontextprotocol/core"
+import { authFetch, createOAuthFetch, type OAuthFetch } from "./mcp-auth-fetch.ts"
 import { resolveCommandSecret } from "./utils.ts"
 import { getAppClientUri, getAppName } from "./agent-dir.ts"
+import { randomUUID } from "node:crypto"
+import { AsyncLocalStorage } from "node:async_hooks"
+import { logOAuthDiagnostic } from "./oauth-diagnostics.ts"
+import { combineAbortSignals } from "./runtime-owner.ts"
 
 /**
  * Client name advertised during Dynamic Client Registration.
@@ -213,11 +222,10 @@ async function loadConfiguredDiscoveryState(
   metadataUrl: string,
   serverUrl: string,
   skipIssuerValidation: boolean,
-  signal?: AbortSignal,
+  fetchFn: FetchLike,
 ): Promise<OAuthDiscoveryState> {
-  const response = await fetch(metadataUrl, {
+  const response = await fetchFn(metadataUrl, {
     headers: { accept: "application/json" },
-    ...(signal !== undefined ? { signal } : {}),
   })
   if (!response.ok) {
     await response.text().catch(() => {})
@@ -248,7 +256,10 @@ async function loadConfiguredDiscoveryState(
  */
 export class McpOAuthProvider implements OAuthClientProvider {
   private readonly redirectUrlSnapshot: string | undefined
+  private authFetch: OAuthFetch
   private active = true
+  private readonly authTransaction = new AsyncLocalStorage<{ active: boolean }>()
+  private readonly deactivation = new AbortController()
   private flowClientInfo: StoredClientInfo | undefined
   private flowCodeVerifier: string | undefined
   private flowDiscoveryState: OAuthDiscoveryState | undefined
@@ -256,6 +267,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
   private flowState: string | undefined
   private invalidatedAccessToken: string | undefined
   private invalidatedClientId: string | undefined
+  private staleRedirectClientId: string | undefined
   private lastObservedClientId: string | undefined
   private lastSavedAccessToken: string | undefined
   private pendingAuthAccessToken: string | undefined
@@ -269,10 +281,41 @@ export class McpOAuthProvider implements OAuthClientProvider {
     private runtimeSignal?: AbortSignal,
     initialState?: string,
   ) {
+    this.authFetch = createOAuthFetch(serverUrl, undefined, runtimeSignal)
     this.flowState = initialState
     this.redirectUrlSnapshot = config.grantType === "client_credentials"
       ? undefined
       : config.redirectUri ?? `http://localhost:${getOAuthCallbackPort()}${getOAuthCallbackPath()}`
+  }
+
+  async withAuthTransaction(operation: () => Promise<AuthResult>): Promise<AuthResult> {
+    this.throwIfInactive()
+    const details = { serverName: this.serverName, transactionId: randomUUID() }
+    const started = performance.now()
+    void logOAuthDiagnostic("oauth_transaction_waiting", details)
+    try {
+      const result = await withAuthEntryTransaction(this.serverName, async () => {
+        this.throwIfInactive()
+        void logOAuthDiagnostic("oauth_transaction_acquired", { ...details, durationMs: performance.now() - started })
+        const transaction = { active: true }
+        return this.authTransaction.run(transaction, async () => {
+          try {
+            return await operation()
+          } finally {
+            transaction.active = false
+          }
+        })
+      }, combineAbortSignals(this.runtimeSignal, this.deactivation.signal))
+      void logOAuthDiagnostic("oauth_transaction_completed", { ...details, result, durationMs: performance.now() - started })
+      return result
+    } catch (error) {
+      void logOAuthDiagnostic("oauth_transaction_failed", { ...details, durationMs: performance.now() - started })
+      throw error
+    }
+  }
+
+  setAuthFetch(fetchFn: OAuthFetch): void {
+    this.authFetch = fetchFn
   }
 
   private get usesClientCredentials(): boolean {
@@ -286,8 +329,10 @@ export class McpOAuthProvider implements OAuthClientProvider {
 
   deactivate(): void {
     this.active = false
+    this.deactivation.abort(new Error("OAuth flow is no longer active"))
     this.invalidatedAccessToken = undefined
     this.invalidatedClientId = undefined
+    this.staleRedirectClientId = undefined
     this.lastObservedClientId = undefined
     this.lastSavedAccessToken = undefined
     this.pendingAuthAccessToken = undefined
@@ -314,6 +359,9 @@ export class McpOAuthProvider implements OAuthClientProvider {
   private throwIfInactive(): void {
     if (!this.active) throw new Error("OAuth flow is no longer active")
     this.runtimeSignal?.throwIfAborted()
+    // The SDK can swallow refresh fetch errors and attempt browser authorization.
+    // A failed service credential must stop that fallback and token persistence.
+    this.authFetch.throwIfHeaderResolutionFailed()
   }
 
   /**
@@ -366,12 +414,12 @@ export class McpOAuthProvider implements OAuthClientProvider {
    * Get client information (for pre-registered or dynamically registered clients).
    * Returns undefined if no client info exists or if the server URL has changed.
    */
-  async clientInformation(): Promise<OAuthClientInformationMixed | undefined> {
+  async clientInformation(ctx?: OAuthClientInformationContext): Promise<OAuthClientInformationMixed | undefined> {
     if (this.invalidatedClientId !== undefined) {
       invalidateAuthEntryCache(this.serverName)
     }
     const issuer = this.discoveredIssuer
-    const stored = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
+    const stored = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions, { migrateLegacy: ctx !== undefined, cache: true })
     this.assertStoredIssuerBindings(stored, issuer)
 
     // Check config first (pre-registered client). Store only its issuer binding.
@@ -380,7 +428,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
       const storedClient = stored?.clientInfo?.clientId === this.config.clientId
         ? stored.clientInfo
         : undefined
-      if (issuer && (storedClient?.issuer !== issuer || storedClient.configPreRegistered !== true)) {
+      if (ctx !== undefined && issuer && (storedClient?.issuer !== issuer || storedClient.configPreRegistered !== true)) {
         updateClientInfo(
           this.serverName,
           { clientId: this.config.clientId, issuer, configPreRegistered: true },
@@ -432,12 +480,22 @@ export class McpOAuthProvider implements OAuthClientProvider {
       }
       if (issuer && clientInfo.issuer === undefined) {
         clientInfo.issuer = issuer
-        this.flowClientInfo = clientInfo
-        updateClientInfo(this.serverName, clientInfo, this.serverUrl, this.storageOptions)
+        if (ctx !== undefined) {
+          this.flowClientInfo = clientInfo
+          updateClientInfo(this.serverName, clientInfo, this.serverUrl, this.storageOptions)
+        }
       }
+      // Keep a stale dynamic registration available for its refresh attempt,
+      // but suppress it if that attempt invalidates the token and auth falls
+      // back to an interactive flow. The next clientInformation() call then
+      // makes the SDK register the current callback URI.
+      const redirectUriIsStale = this.redirectUrl !== undefined
+        && (!Array.isArray(clientInfo.redirectUris) || !clientInfo.redirectUris.includes(this.redirectUrl))
+      this.staleRedirectClientId = redirectUriIsStale ? clientInfo.clientId : undefined
       // Return all registration metadata and the local issuer extension.
       // This keeps the SDK OAuth view and the stored issuer binding consistent.
       this.lastObservedClientId = clientInfo.clientId
+      if (this.flowState) this.flowClientInfo = clientInfo
       return {
         client_id: clientInfo.clientId,
         client_secret: clientInfo.clientSecret,
@@ -506,14 +564,14 @@ export class McpOAuthProvider implements OAuthClientProvider {
     }
 
     // Use getAuthForUrl to validate tokens are for the current server URL.
-    const entry = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions)
+    const entry = await getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions, { migrateLegacy: ctx !== undefined, cache: true })
     if (!entry?.tokens || entry.tokens.accessToken === this.invalidatedAccessToken) return undefined
     this.invalidatedAccessToken = undefined
     const issuer = this.discoveredIssuer
     this.assertStoredIssuerBindings(entry, issuer)
     if (issuer && entry.tokens.issuer === undefined) {
       entry.tokens.issuer = issuer
-      updateTokens(this.serverName, entry.tokens, this.serverUrl, this.storageOptions)
+      if (ctx !== undefined) updateTokens(this.serverName, entry.tokens, this.serverUrl, this.storageOptions)
     }
     if (ctx !== undefined) {
       this.pendingAuthAccessToken = entry.tokens.accessToken
@@ -537,8 +595,15 @@ export class McpOAuthProvider implements OAuthClientProvider {
       ...(tokens.scope !== undefined ? { scope: tokens.scope } : {}),
       ...(issuer !== undefined ? { issuer } : {}),
     }
-    this.throwIfInactive()
-    updateTokens(this.serverName, storedTokens, this.serverUrl, this.storageOptions)
+    // A refresh may have rotated remotely before cancellation was observed.
+    // Persist its response while the transaction still owns the credential lock.
+    if (!this.authTransaction.getStore()?.active) this.throwIfInactive()
+    const entry = getAuthForUrl(this.serverName, this.serverUrl, this.storageOptions) ?? {}
+    saveAuthEntry(this.serverName, {
+      ...entry,
+      tokens: storedTokens,
+      ...(this.flowClientInfo ? { clientInfo: this.flowClientInfo } : {}),
+    }, this.serverUrl, this.storageOptions)
     this.invalidatedAccessToken = undefined
     this.lastSavedAccessToken = storedTokens.accessToken
     // Discovery must survive the browser redirect so the callback can verify
@@ -611,7 +676,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
         this.config.authServerMetadataUrl,
         this.serverUrl,
         this.config.skipIssuerMetadataValidation === true,
-        this.runtimeSignal,
+        authFetch(combineAbortSignals(this.runtimeSignal, this.deactivation.signal), this.authFetch),
       )
     }
     return this.flowDiscoveryState ? structuredClone(this.flowDiscoveryState) : undefined
@@ -657,6 +722,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
         this.flowState = undefined
         this.invalidatedAccessToken = undefined
         this.invalidatedClientId = undefined
+        this.staleRedirectClientId = undefined
         this.lastObservedClientId = undefined
         this.lastSavedAccessToken = undefined
         this.pendingAuthAccessToken = undefined
@@ -679,6 +745,9 @@ export class McpOAuthProvider implements OAuthClientProvider {
         this.invalidatedAccessToken = this.pendingAuthAccessToken ?? this.lastSavedAccessToken
         this.lastSavedAccessToken = undefined
         this.pendingAuthAccessToken = undefined
+        if (this.staleRedirectClientId !== undefined) {
+          this.invalidatedClientId = this.staleRedirectClientId
+        }
         invalidateAuthEntryCache(this.serverName)
         break
       case "verifier":

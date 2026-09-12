@@ -16,7 +16,7 @@ const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf
 };
 
 const hostPeerPackages = {
-  "@earendil-works/pi-ai": { peer: "^0.84.1", dev: "0.84.1" },
+  "@earendil-works/pi-ai": { peer: "^0.84.1 || ^0.85.0", dev: "0.84.1" },
   "@earendil-works/pi-tui": { peer: "*", dev: "0.84.1" },
   "typebox": { peer: "*", dev: "1.3.3" },
 };
@@ -106,11 +106,13 @@ describe("package.json dependency policy", () => {
     }
   });
 
-  it("uses the stable modular SDK v2 client/core packages without the legacy monolithic SDK", () => {
+  it("pins modular SDK client/core previews to the same immutable commit", () => {
     expect(packageJson.dependencies?.["@modelcontextprotocol/ext-apps"]).toBeDefined();
     expect(packageJson.dependencies?.["@modelcontextprotocol/sdk"]).toBeUndefined();
-    expect(packageJson.dependencies?.["@modelcontextprotocol/client"]).toBe("2.0.0");
-    expect(packageJson.dependencies?.["@modelcontextprotocol/core"]).toBe("2.0.0");
+    const client = packageJson.dependencies?.["@modelcontextprotocol/client"];
+    const core = packageJson.dependencies?.["@modelcontextprotocol/core"];
+    expect(client).toMatch(/^https:\/\/pkg\.pr\.new\/@modelcontextprotocol\/client@[a-f0-9]{40}$/);
+    expect(core).toBe(client?.replace("/client@", "/core@"));
     expect(packageJson.devDependencies?.["@modelcontextprotocol/server"]).toBeUndefined();
   });
 });

@@ -83,6 +83,10 @@ Precedence is (later entries win):
 5. `.mcp.json`
 6. `.pi/mcp.json`
 
+Ancestor discovery is off by default. To opt in, set `settings.ancestorConfigRoots` in a user-global config above, or in the explicitly selected `--mcp-config`/`configPath` file, for example `"ancestorConfigRoots": ["~/work/team"]`. Each root must be an explicit absolute path or `~/...`, resolve to an existing directory under `$HOME`, and contain the canonical cwd. If several roots match, only the nearest (deepest) is used. Project `.mcp.json` and `.pi/mcp.json` files cannot enable discovery or extend the boundary.
+
+Within the selected root, existing `.mcp.json` and `<configDir>/mcp.json` (normally `.pi/mcp.json`) files load between steps 4 and 5, from the root through parent(cwd), farthest first. Nearer directories override farther ones, Pi overrides shared config within each directory, and cwd files win over ancestors. Search never goes above the configured root or `$HOME`; the boundary limits discovery but is not a file-ownership or symlink-target sandbox. Only configure roots whose project files you trust. `/mcp setup` write targets and project-local `/mcp disable` and `/mcp enable` overrides are unchanged.
+
 `/mcp disable <server>` and `/mcp enable <server>` persist only the `disabled` field in the project-local `.pi/mcp.json`, which is the highest-precedence Pi layer. Enabling removes the project flag when lower layers are enabled, or writes `false` when needed to override a disabled lower source. This applies even when the effective server came from a shared global/project file, an imported host config, or `configPath`; the source file is never rewritten and credentials are never copied. Run `/reload` after changing the flag so registered tool surfaces are refreshed. The manual equivalent is to add `{ "disabled": true }` to a server in any normal MCP config. Supplied in-memory `createMcpAdapter({ config })` configurations are isolated and do not read or write this project override; the commands are unavailable in that mode.
 
 Servers are **lazy by default** — they won't connect until you actually call one of their tools. The adapter caches tool metadata so search and describe work without live connections.
@@ -138,7 +142,36 @@ The adapter can load MCP servers from [Agent Plugins](https://agent-plugins.org/
 
 Each directory must contain a valid Agent Plugins 1.0 `plugin.json`. If it also has a root `mcp.json`, the adapter loads its `mcpServers` entries and prefixes them as `<plugin>__<server>`. The loader uses the Agent Plugins transport declared by each server `type` and skips invalid entries without blocking other servers. For stdio plugin servers, `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` are expanded only in `args`, `env`, and `cwd`; the adapter sets both variables for the child process and stores plugin data under the Pi agent directory.
 
+`inheritEnv` is an adapter-specific Pi field, not an Agent Plugins or OpenCode schema field. Do not add it to a plugin's strict `mcp.json`; to opt a plugin stdio server out of host-environment inheritance, set `inheritEnv: false` in a normal Pi override using the translated `<plugin>__<server>` name:
+
+```json
+{
+  "mcpServers": {
+    "acme_tools__local": { "inheritEnv": false }
+  }
+}
+```
+
 Agent Plugins is a portable package format. Native Pi MCP config remains `.mcp.json`, `~/.config/mcp/mcp.json`, and Pi-owned overrides.
+
+### Local Claude plugin bundles
+
+The adapter can opt into MCP servers and Pi skills from explicitly configured local [Claude plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) directories:
+
+```json
+{
+  "claudePlugins": [
+    { "path": "./plugins/acme-tools", "mcp": true, "skills": true }
+  ],
+  "mcpServers": {}
+}
+```
+
+Each entry needs a non-empty `path` and must enable `mcp`, `skills`, or both. The root-level field can be set in any normal adapter config source; normal config-source precedence applies, and a higher-precedence `claudePlugins` array replaces a lower one. Relative paths in file-based config resolve from the active project cwd. For `createMcpAdapter({ config })`, relative plugin paths are normalized against `process.cwd()` when the factory is created; this explicit API-boundary snapshot keeps early registration and session startup on the same local bundle even when the host's context cwd differs. `mcp: true` reads only the plugin's root `.mcp.json`; `skills: true` discovers `skills/**/SKILL.md` inside the plugin and passes those files through Pi's normal resource discovery, including startup and `/reload`. A `.claude-plugin/plugin.json` manifest is optional, matching Claude's plugin format, but when present it must be valid JSON with a kebab-case `name` and valid standard field types. Manifest path overrides are intentionally not followed.
+
+Claude plugin MCP server names are used as written. The first explicitly listed plugin wins same-name conflicts between plugin bundles, while every normal Pi MCP config source overrides these plugin defaults. `${CLAUDE_PLUGIN_ROOT}` is expanded in plugin MCP server fields, and stdio servers receive it in their environment. Skills use Pi's existing skill parsing and conflict handling.
+
+This is an explicit local trust boundary: the adapter does not discover, download, install, or update plugins; execute plugin hooks; or fetch skills from MCP instructions. It resolves plugin components inside each configured directory and rejects component symlinks that escape it. Config and skills are read during discovery, but MCP commands are still lazy and run only when normal adapter lifecycle/tool use connects that server. Enable `mcp` only for plugin directories whose commands and configuration you trust.
 
 ### Pi package manifests
 
@@ -220,7 +253,7 @@ const extension = createMcpAdapter({
 
 The package ships TypeScript source for Pi's source-loader and SDK integrations. Use a TypeScript-capable loader/toolchain (for example `node --import tsx`) when importing the package from a standalone Node process; raw Node ESM does not execute the `.ts` entry directly.
 
-A supplied `config` is a complete, isolated snapshot. It is not merged with files, imports, global config, project config, or `--mcp-config`, and it is never mutated. Each adapter factory and session receives its own clone, so separate integrations can use different servers and settings safely. In this mode, server status, reconnect, explicit `/mcp-auth <server>`, proxy calls, and direct tools continue to work; setup and no-argument auth/status panels report the limitation instead of discovering or writing ambient config.
+A supplied `config` is a complete, isolated snapshot. It is not merged with files, imports, global config, project config, or `--mcp-config`, and it is never mutated. Explicit `claudePlugins` entries are the sole exception to file isolation: their configured local directories are read because they are part of that supplied snapshot. Relative programmatic plugin paths are normalized against `process.cwd()` when `createMcpAdapter` creates the factory, so the early model-facing surface, load-time initialization, and later session runtime all use the same bundle. Each adapter factory and session receives its own clone, so separate integrations can use different servers and settings safely. In this mode, server status, reconnect, explicit `/mcp-auth <server>`, proxy calls, and direct tools continue to work; setup and no-argument auth/status panels report the limitation instead of discovering or writing ambient config.
 
 With `configPath` and no `config`, the adapter keeps normal file merge behavior, and that path takes precedence over argv and `--mcp-config`. The default export keeps the normal file-based behavior. OAuth credentials are stored in the operating system credential store and keyed by the configured server name; URL binding prevents credentials from being accepted for a different server URL. `settings.oauthDir` and `MCP_OAUTH_DIR` are used only as legacy plaintext import locations for older `tokens.json` files, not as credential namespaces. CSRF state and PKCE verifiers are flow-local, so concurrent authorization flows do not share transient secrets.
 
@@ -230,10 +263,10 @@ Cooperating Pi extensions can use `pi-mcp-adapter/oauth` to reuse URL-bound OAut
 import { getMcpOAuthTokensForUrl, updateMcpOAuthTokensForUrl } from "pi-mcp-adapter/oauth";
 
 const tokens = await getMcpOAuthTokensForUrl("jira", "https://jira.example.com/mcp");
-updateMcpOAuthTokensForUrl("jira", "https://jira.example.com/mcp", { accessToken: "..." });
+await updateMcpOAuthTokensForUrl("jira", "https://jira.example.com/mcp", { accessToken: "..." });
 ```
 
-The public subpath exposes only token read/update helpers plus a status helper. The async read path uses the adapter's refresh logic before it returns tokens. The helpers keep secure-store storage, URL binding, refresh persistence, chunk handling, legacy import, and fail-closed credential-store errors. They do not expose client registration secrets, PKCE verifiers, or OAuth state.
+The public subpath exposes only token read/update helpers plus a status helper. The async read path uses the adapter's refresh logic before it returns tokens. For a service-protected endpoint or a pre-registered OAuth client, pass the explicit refresh configuration as `getMcpOAuthTokensForUrl(name, url, { definition: { headers, oauth } })`. This optional configuration is never loaded from ambient config or stored with the tokens; headers are bound to the supplied MCP URL's origin. The helpers keep secure-store storage, URL binding, refresh persistence, chunk handling, legacy import, and fail-closed credential-store errors. They do not expose client registration secrets, PKCE verifiers, or OAuth state.
 
 ### Runtime status snapshots
 
@@ -249,7 +282,7 @@ pi.events.on(MCP_STATUS_EVENT, (snapshot) => {
 });
 ```
 
-The snapshot is read-only machine-readable data with copied per-server entries. It includes `totalTools`, `totalResources`, `connectedCount`, and `disabledCount`; each server includes `name`, `status`, `toolCount`, and `disabled`, with `resourceCount` when known and `failedAgoSeconds` only for an active failure. Reading status never connects a lazy server, starts authentication, or exposes SDK clients, transports, credentials, or server definitions. An initial snapshot is emitted after initialization, updates are emitted for status and metadata changes, and an empty snapshot is emitted when the session shuts down. Initialization withholds that first snapshot until authoritative metadata has been reconciled into Pi's active direct-tool registry. A `connected` snapshot therefore follows model-facing tool-surface synchronization, including removal of stale cached tools when the authoritative catalog is empty.
+The snapshot is read-only machine-readable data with copied per-server entries. It includes `totalTools`, `totalResources`, `connectedCount`, and `disabledCount`; each server includes `name`, `status`, `toolCount`, `directToolCount` (the number of tools currently registered directly with Pi, including direct resource tools), and `disabled`, with `resourceCount` when known and `failedAgoSeconds` only for an active failure. Reading status never connects a lazy server, starts authentication, or exposes SDK clients, transports, credentials, or server definitions. An initial snapshot is emitted after initialization, updates are emitted for status and metadata changes, and an empty snapshot is emitted when the session shuts down. Initialization withholds that first snapshot until authoritative metadata has been reconciled into Pi's active direct-tool registry. A `connected` snapshot therefore follows model-facing tool-surface synchronization, including removal of stale cached tools when the authoritative catalog is empty.
 
 In the configuration examples below, `30000` is illustrative only. If `requestTimeoutMs` is omitted or set to `<= 0`, the MCP SDK default timeout is used.
 
@@ -275,16 +308,18 @@ In the configuration examples below, `30000` is illustrative only. If `requestTi
 | `args` | Command arguments |
 | `socket` | Explicit `rmcp-mux` Unix-domain socket path; supports `${VAR}`, `$env:VAR`, and `~` expansion and is mutually exclusive with `command` and `url` |
 | `env` | Environment variables; supports `${VAR}` and `$env:VAR` interpolation. A value beginning with `!` runs a command when the stdio server connects; use `!!` for a literal leading `!`. |
+| `inheritEnv` | Stdio only; defaults to `true` and preserves full host-environment inheritance. Set to `false` to exclude arbitrary host variables from the MCP child and SDK negotiation sibling while retaining SDK platform defaults and explicit `env` overlays. This is not an empty environment or an OS sandbox. |
 | `cwd` | Working directory; supports `${VAR}`, `$env:VAR`, and `~` expansion |
 | `url` | HTTP endpoint (StreamableHTTP with SSE fallback); supports raw `${VAR}` and `$env:VAR` interpolation, and missing URL variables fail before any request is sent |
 | `headers` | HTTP headers; supports `${VAR}` and `$env:VAR` interpolation. A value beginning with `!` runs a command when the HTTP server connects or OAuth authenticates; use `!!` for a literal leading `!`. |
 | `requestHeadersCommand` | Trusted executable run for every HTTP request. It receives a versioned JSON envelope containing `method`, `url`, and the exact `bodyBase64` on stdin, and must return a JSON object of headers on stdout. `command`, `args`, and `env` support environment interpolation. Use for caller-bound request signatures; failures stop the request. |
+| `caFile` | HTTPS HTTP servers only: local PEM CA certificate/bundle, e.g. `"caFile": "~/certs/local-ca.pem"`. Replaces (does not add to) default roots for the resolved MCP origin. Supports environment interpolation and `~`; relative paths use the process working directory. Unreadable/invalid files fail closed; hostname and certificate-expiry verification remain enabled. |
 | `auth` | `"bearer"` or `"oauth"` |
 | `oauth.grantType` | `"authorization_code"` (default) or `"client_credentials"` for non-interactive machine auth |
 | `oauth.clientId` | Pre-registered OAuth client ID. MCP 2026 prefers pre-registered clients or Client ID Metadata Documents; this adapter falls back to Dynamic Client Registration when the ID is omitted and the server supports it. |
 | `oauth.clientSecret` | OAuth client secret for confidential clients; a value beginning with `!` runs a command when OAuth authenticates, while `!!` escapes a literal leading `!` |
 | `oauth.scope` | Requested OAuth scopes |
-| `oauth.redirectUri` | Exact redirect URI for browser OAuth. Local `http://` loopback URIs need an explicit port. Pre-registered `https://` callbacks use manual completion by pasting the full callback URL. |
+| `oauth.redirectUri` | Redirect URI for browser OAuth. Dynamic clients normally omit it and use an OS-assigned localhost callback port. Local `http://` loopback URIs accept an explicit port or `{port}` for an OS-assigned port (for example, `http://127.0.0.1:{port}/callback`). Pre-registered `https://` callbacks use manual completion by pasting the full callback URL. |
 | `oauth.clientName` | Client display name advertised during Dynamic Client Registration fallback |
 | `oauth.clientUri` | Client homepage URI advertised during Dynamic Client Registration fallback. Defaults to `piConfig.clientUri` from the host's manifest when set, and is omitted rather than guessed under a rebranded host |
 | `oauth.logoUri` | Client logo URL advertised during Dynamic Client Registration fallback (RFC 7591 `logo_uri`). Must be an absolute `http(s)` URL — consent screens fetch it server-side, so local paths render nothing. Omitted from the registration request when unset |
@@ -306,6 +341,16 @@ In the configuration examples below, `30000` is illustrative only. If `requestTi
 | `trace` | Enable metadata-only JSONL protocol tracing for this server; payloads, prompts, tool arguments/results, authorization data, and URLs are never persisted |
 | `disabled` | Keep the server visible in config and status, but prevent connections, authentication, tools, and resource calls (only literal `true` disables it) |
 
+#### Custom HTTPS trust
+
+`caFile` works with Streamable HTTP, SSE, and per-request header commands. Requests using this trust reject all redirects; configure the final HTTPS endpoint directly. Other origins and servers retain default trust. Layered configuration drops inherited trust when replacing the URL or switching away from HTTP. This option covers the MCP origin, including connection-owned OAuth requests to that exact origin, but not the separate interactive OAuth flow or private-CA authorization servers on other origins. Thanks to [@desmonna](https://github.com/desmonna) for #527.
+
+#### macOS local-network access
+
+On macOS 15+, Local Network Privacy may deny access to a LAN MCP server depending on the app responsible for hosting Pi. For HTTP URLs with literal private/link-local IPv4 or IPv6 addresses, the adapter adds a hint to `EHOSTUNREACH`, `ENETUNREACH`, or `EACCES` connection errors while retaining the original cause. These codes can also mean routing or firewall trouble; the hint is not proof of a privacy denial. Hostnames are not resolved for this diagnostic.
+
+Check **System Settings > Privacy & Security > Local Network** for the hosting app, enable access if listed, then restart that app and Pi. If it is absent or access still fails, try launching Pi directly from Apple Terminal.app or over SSH (contexts Apple documents as exempt). Permission is attributed to responsible code, not necessarily Node or Pi; signing an unsigned CLI alone does not guarantee a permission prompt or fix host attribution. See [Apple TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
+
 #### Protocol version negotiation
 
 The adapter defaults to `protocolVersion: "legacy"`. Omitting the field uses the classic MCP initialize sequence without `server/discover` or 2026 headers, preserving compatibility with deployed 2025-era servers.
@@ -316,13 +361,29 @@ Use `"2026-07-28"` to pin that revision. Pinning has no legacy or SSE fallback a
 
 The stable SDK handles era-specific request envelopes, result decoding, list-changed subscriptions, cancellation, and multi-round-trip sampling/elicitation. The SDK's embedded-input progress callback does not expose the originating tool or resource identity, so the adapter cannot maintain a durable per-tool waiting status row; interactive sessions keep the existing input dialog visible, and proxy calls show request progress when UI is available. The adapter keeps strict OAuth issuer validation in every mode. Adapter-level roots support, standard MCP logging presentation, and configuration/UI for protocol cache hints are not yet implemented.
 
-For pre-registered browser OAuth clients, set `oauth.redirectUri` to the exact callback registered with the provider, for example `"http://localhost:3118/callback"`. Dynamic clients normally omit it and use a lazy OS-assigned localhost callback port. A configured `https://` callback runs in manual mode because the adapter cannot receive a callback on another host. After authorization, copy the full callback URL from the browser address bar and paste it into `/mcp-auth` or `mcp({ action: "auth-complete", ... })`.
-
 If an internal authorization server publishes mismatched OAuth metadata and cannot be fixed immediately, set `oauth.skipIssuerMetadataValidation: true` on that server only. This is security-weakening. It disables the RFC 8414 issuer echo check and should not be used for public or untrusted servers.
 
 If an MCP server does not publish usable protected-resource metadata, set `oauth.authServerMetadataUrl` to its HTTPS OAuth/OIDC authorization-server metadata document. The configured document is used authoritatively, while issuer validation remains enabled by default. This is trusted configuration; use it only for a metadata endpoint you control or explicitly trust.
 
-Secret values in `headers`, `bearerToken`, `oauth.clientSecret`, and stdio `env` may use a leading `!command` to obtain their value at connection or authentication time. The command runs with stdin and stderr suppressed, stdout is limited to 1 MiB and trimmed, and it must finish within 10 seconds with non-empty output; failures stop the connection or authentication flow. Commands are not run during OAuth discovery or while reading, merging, previewing, hashing, or rendering configuration. Use `!!` to escape a literal leading `!`; ordinary and escaped values retain environment interpolation.
+#### Stdio environment boundaries
+
+`inheritEnv: false` applies only to the actual MCP stdio server process and, for `protocolVersion: "auto"` or `"2026-07-28"`, its disposable SDK negotiation sibling. It does not change the default for other servers: omitting the field or setting it to `true` preserves the existing full host-environment inheritance. With `false`, the SDK still supplies its platform defaults and configured `env` values remain explicit overlays; the result is not a literally empty environment and is not an OS sandbox.
+
+Environment interpolation remains intentional. `${VAR}`, `$env:VAR`, and `{env:VAR}` values still read selected host variables and can place those values in the child. `literalEnv: true` keeps its existing behavior by treating configured stdio `env` values as literals. The following helper boundaries are unchanged and still retain the full host environment even when a server uses `inheritEnv: false`:
+
+- npm/npx cache resolution and cache-population subprocesses;
+- `!command` secret helpers used by stdio `env` (and other secret fields); and
+- the HTTP `requestHeadersCommand` helper.
+
+For tighter use, configure a direct executable instead of npm/npx and avoid `!command` secret helpers. This option limits stdio child inheritance only; it does not provide complete multi-agent or helper-process isolation.
+
+With explicit `auth: "oauth"`, configured HTTP `headers` also accompany native OAuth metadata discovery (including `oauth.authServerMetadataUrl`), dynamic registration, code exchange, and refresh, **only at the configured MCP URL's origin** (scheme, host, and port). Discovered or explicitly configured cross-origin OAuth endpoints receive no configured service headers. SDK-owned headers such as OAuth `Authorization` and content types take precedence over configured `headers`. Requests carrying configured service headers reject all HTTP redirects, including same-origin redirects; configure the final endpoint directly. Browser authorization navigation and loopback callbacks do not use these headers. Missing or empty header credentials fail closed.
+
+`requestHeadersCommand` follows the fetch path, not the URL path: during a server connection, it wraps the SDK transport fetch (`requestFetch`), so it runs for MCP requests and SDK-owned OAuth requests using that fetch, including discovery, dynamic registration, token exchange (including `client_credentials`), and refresh. It also runs for cross-origin OAuth endpoints: unlike configured `headers`, command-produced headers are **not origin-scoped**. The command receives each request's exact method, URL, and body and must decide where its credentials belong. Its returned headers are applied last, overriding even SDK `Authorization` and content types on name collisions; avoid those names unless intentional.
+
+Provider-owned metadata loading through `authFetch` (notably `oauth.authServerMetadataUrl`) bypasses the command, even during a connection. Standalone OAuth start/complete/refresh helpers use their own OAuth fetch, not the transport wrapper, and also bypass it. Browser authorization navigation and loopback callbacks never invoke the command. Thus this is transport-fetch signing, not a hook for every OAuth interaction.
+
+Secret values in `headers`, `bearerToken`, `oauth.clientSecret`, and stdio `env` may use a leading `!command` to obtain their value at connection or authentication time. The command runs with stdin and stderr suppressed, stdout is limited to 1 MiB and trimmed, and it must finish within 10 seconds with non-empty output; failures stop the connection or authentication flow. Commands are not run during the preliminary MCP OAuth challenge probe or while reading, merging, previewing, hashing, or rendering configuration. OAuth header commands resolve lazily for the actual SDK backchannel requests, once per authentication leg or connection; the preliminary probe omits command headers. Use `!!` to escape a literal leading `!`; ordinary and escaped values retain environment interpolation.
 
 For local desktop bearer tokens, `bearerTokenStore: true` can opt in to the adapter-owned credential-store namespace. It never falls back to plaintext if the store is unavailable, if the stored record is malformed, or if the stored URL differs from the effective server URL. Literal tokens, command tokens, and environment tokens keep precedence so existing configs do not change. Create or rotate a stored token with `pi-mcp-adapter token set <server>` (masked prompt on a terminal, or piped stdin such as `security find-generic-password -s my-token -w | pi-mcp-adapter token set <server>`); the record binds to the effective configured URL at write time. Token commands need Node 22.18+.
 
@@ -342,6 +403,20 @@ To share one stdio MCP server across Pi sessions, run it under [`rmcp-mux`](http
 
 The adapter owns only its client socket and closes that connection when the Pi runtime stops. `rmcp-mux` owns the upstream process, request routing, initialization cache, restart policy, client limits, and socket permissions. Start and configure the mux separately; the adapter never discovers, starts, adopts, or stops its daemon. A socket is an explicit trusted local endpoint, so do not point unrelated projects or users at a mux service unless its tools, state, credentials, and filesystem access are intended to be shared.
 
+### Install from one URL
+
+Install an MCP endpoint without editing configuration:
+
+```js
+mcp({ action: "install", url: "https://example.com/mcp" })
+```
+
+Install validates and connects the endpoint. New entries use a name derived from the hostname and are saved to Pi's global MCP config; existing URL entries are reused without rewriting. Pass `server` to choose a name or `target: "project"` to save to the project's `.mcp.json`. Unsafe URLs, name collisions, and failed connections are not persisted.
+
+In exclusive config mode, a project target must be the active config path; otherwise use the global target. URL install cannot promote runtime-registered servers: save their complete definitions manually so required headers and transport/auth settings are retained.
+
+Public servers are ready immediately. For OAuth servers, the same action opens the authorization page and watches a reachable loopback callback. After the user grants consent, an `mcp-oauth-status` message returns the agent to connect the server and verify its discovered tools. Remote/headless callbacks retain the manual completion fallback below.
+
 ### Remote/headless OAuth
 
 If Pi is running on a remote server, `/mcp-auth <server>` shows a clickable authorization URL first. Open it in your local browser and approve access, then select **Yes** in Pi to open the callback input. The browser may fail to load the localhost callback page because localhost refers to your workstation; copy the full URL from its address bar and paste it into Pi. The authorization screen closes automatically instead when the browser can reach Pi's callback directly.
@@ -354,7 +429,7 @@ On Linux, if credential access fails because Pi inherited a revoked session keyr
 mcp({ action: "auth-start", server: "linear-server" })
 ```
 
-Open the returned authorization URL in your local browser. After approval, your browser redirects to a localhost URL. On a remote server that local page may fail to load; copy the full URL from the browser address bar anyway and complete the flow in the same Pi session:
+For a loopback redirect, the adapter attempts to open the returned authorization URL, watches the callback, completes token exchange, and sends an `mcp-oauth-status` event when authentication finishes. If Pi is remote or cannot open a browser, open the returned URL locally. If the browser cannot reach Pi's callback, copy the full localhost URL from the address bar and complete the flow in the same Pi session:
 
 ```js
 mcp({
@@ -416,17 +491,18 @@ When any enabled server uses `eager` or `keep-alive`, initialization also starts
 | `collapsedResultLines` | Number of result text lines to show before expansion: `1`, `2`, or `3`. Defaults to `1` in compact mode and `3` in boxed mode. |
 | `notifyOnStartupConnect` | Show successful startup connection notices (default: `true`). Set to `false` to suppress routine `MCP: N servers connected (M tools)` notices. Connection errors and authentication warnings remain visible. |
 | `hostConfigDiscovery` | Host-specific config policy: `"off"` (default), `"prompt"` (detect/report only), or `"on"` (explicitly load detected host configs as the lowest-precedence fallback) |
+| `ancestorConfigRoots` | Trusted absolute or `~/...` roots for opt-in ancestor config discovery. Only user-global or explicitly selected config may set it; the deepest root containing cwd is used. |
 | `agentPluginPaths` | Agent Plugins package directories to load MCP servers from. Relative paths resolve from the active project cwd. |
 | `approveTools` | `true` to require approval before every MCP tool call, or an array of glob patterns such as `["github_delete_*", "notion_update_*"]`. Per-server `approveTools` overrides this. |
 | `oauthDir` | Legacy OAuth `tokens.json` import directory for this MCP config. Relative paths resolve from the active project cwd. `MCP_OAUTH_DIR` still wins when set. Persistent OAuth credentials are stored in the OS credential store, not this directory. |
 | `mcpServers.<name>.oauth.authorizationParams` | Extra authorization URL parameters for provider-specific OAuth extensions. Flow-owned parameters such as `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge`, `response_type`, and `resource` cannot be overridden. |
-| `directTools` | Global default for all servers (default: false). Per-server overrides this. |
+| `directTools` | Global default for all servers (default: false). `true`, `false`, or `"search"`. Per-server overrides this. |
 | `strictDirectToolArguments` | Validate direct-tool inputs against their advertised schemas and recover one JSON string layer for object and array properties (default: false). |
 | `directToolResultDetails` | Direct-tool result details: `"lean"` (default) or `"bounded"` to retain the guarded raw MCP result. |
 | `warnOnLargeDirectTools` | Show the advisory when 75 or more direct tools resolve (default: `true`). Set to `false` to suppress only this advisory. |
 | `freezeDirectTools` | Keep direct-tool registration stable after the initial sync so metadata updates and explicit reconnects do not rebuild the system prompt. Proxy/search/cache metadata still refreshes. Default: false. |
 | `scriptMode` | Register the MCP-only `mcpScript` plain-JavaScript tool (default: true). Set to `false` to hide it. |
-| `disableProxyTool` | Hide the `mcp` proxy tool once configured direct tools are fully available from cache. |
+| `disableProxyTool` | Hide the `mcp` proxy tool once configured direct tools are fully available from cache. Ignored while any server uses `directTools: "search"`, whose tools are registered inactive and can only be activated through `mcp({ search })`. |
 | `autoAuth` | Auto-run OAuth on `connect`/tool calls when a server needs auth, then retry once (default: false). |
 | `sampling` | Allow MCP servers to sample through Pi models, honoring `modelPreferences.hints` before current/default fallback (default: true when UI approval is available). |
 | `samplingAutoApprove` | Skip sampling confirmation prompts. Required for sampling in non-UI sessions (default: false). |
@@ -452,7 +528,7 @@ Use `approveTools` when a tool should stay visible but not run without confirmat
 }
 ```
 
-When a matching tool is called from the proxy tool, a direct MCP tool, a resource call, or an MCP UI iframe, Pi asks: **Allow once**, **Allow for session**, or **Deny**. Session approvals are kept in memory only. In headless sessions, matching calls fail closed with an `approval_required` result instead of running. `excludeTools` still removes tools entirely; `approveTools` only gates visible tools at call time.
+When a matching tool is called from the proxy tool, a direct MCP tool, a resource call, or an MCP UI iframe, Pi asks: **Allow once**, **Allow for session**, or **Deny**. **Allow for session** tool grants and MCP UI iframe consent decisions (including denials) persist as non-LLM custom entries on the active Pi session branch and restore on resume or branch navigation. Entries store only server/tool names and deterministic definition/argument hashes; raw arguments, results, and secrets never persist. Tool grants and iframe consent remain separate gates. In headless sessions, matching calls fail closed with an `approval_required` result; denials, abstentions, **Allow once**, and approval-required paths do not create tool grant records. `excludeTools` still removes tools entirely; `approveTools` only gates visible tools at call time.
 
 Permission extensions can broker these decisions by listening on `pi-mcp-adapter:tool-approval-request` and claiming the request synchronously:
 
@@ -469,7 +545,7 @@ pi.events.on(MCP_TOOL_APPROVAL_REQUEST_EVENT, (request: McpToolApprovalRequest) 
 });
 ```
 
-The request includes `serverName`, `originalToolName`, `prefixedToolName`, `args`, `origin`, and optional `signal`. The first synchronous claim wins. `allow_for_session` updates the same in-memory approval cache as the built-in dialog; `deny` blocks the MCP call; `abstain` or no claim preserves the fallback behavior above. Brokered approval runs for every uncached MCP call regardless of `approveTools` configuration, across proxy, direct, `mcpScript`, resource, and iframe origins.
+The request includes `serverName`, `originalToolName`, `prefixedToolName`, `args`, `origin`, and optional `signal`. The first synchronous claim wins. Brokered approval runs for every resolved MCP call reaching the approval gate, including calls matching session grants restored from the active branch, regardless of `approveTools` configuration, across proxy, direct, `mcpScript`, resource, and iframe origins. `allow_once` permits only the current call; `allow_for_session` updates the same session-scoped approval cache and persistence path as the built-in dialog; `deny` blocks the current MCP call even if cached, without revoking its grant. Only `abstain` or no claim consults the cache, then the configured approval/UI fallback above if no matching grant exists. With no broker listener, fallback behavior is unchanged.
 
 ### Output Guard
 
@@ -524,9 +600,15 @@ emit({ tool: details.path, completed: true });
 return result.data;
 ```
 
+Depending on the server, successful `result.data` may be the raw MCP `CallToolResult` envelope rather than the domain payload. Check `result.data.structuredContent` for the fields your script expects; if they are absent, inspect text blocks in `result.data.content` too. If neither shape is understood, return the envelope for inspection instead of coercing it to an empty collection.
+
 See the bundled `mcp-scripting` skill for the complete workflow guide. The API is `await tools.search({ query, server?, limit?, offset? })`, `await tools.describe({ path })`, `tools.call(path, args)`, direct flat calls, `emit(value)`, and a captured `console`. Use ordinary JavaScript loops and Promise utilities for composition; fluent helpers such as `tools.find(...).one()`, `tools.parallel(...)`, and `tools.retry(...)` are not provided. MCP calls return `{ ok: true, data }` or `{ ok: false, error: { code, message } }`, so a failed call does not stop the rest of the script. Result details include a concise `calls` trace with each operation, its path or query, outcome, and duration. Emitted values and console output appear before the script's final return value, and the combined result uses the normal MCP output guard. The default timeout is 30 seconds; each script runs in a worker thread that is terminated at the deadline, including for infinite loops.
 
-For a tool-restricted subagent, launch the child Pi with its tool allowlist set to `["mcpScript"]`. Have the parent discover MCP tool names with `mcp({ search: "..." })` and include the relevant prefixed names in the child's task; the child can then loop, filter, and chain those MCP calls without filesystem, shell, or edit tools. The adapter's ordinary lazy connection, authentication, output guard, abort handling, and approval gates still apply to every call.
+Successful intermediate results reach the script without presentation truncation, details summaries, or output-guard spill files. Each script has a fixed **16 MiB cumulative UTF-8 JSON transfer budget** for successful intermediate data, shared by sequential and parallel calls. A result that cannot fit returns `{ ok: false, error: { code: "intermediate_result_too_large", message } }` and a failed call trace; rejected bytes do not consume the budget, and the script can continue. Request less data or start a new script; there is no configuration option for this cap. Resource calls retain their text-result semantics. Only script-selected output (`emit`, captured console, and `return`) reaches the final output guard; ordinary MCP calls remain guarded as before.
+
+The upstream tool executes before this check and may already have side effects. This is a transfer budget, not a total-memory limit: SDK responses, JSON serialization (including rejected results), copies, concurrent responses, and script-created values still allocate memory. Synchronous serialization can delay deadline handling.
+
+For a tool-restricted subagent, launch the child Pi with its tool allowlist set to `["mcpScript"]`. Have the parent discover MCP tool names with `mcp({ search: "..." })` and include the relevant prefixed names in the child's task; the child can then loop, filter, and chain those MCP calls without filesystem, shell, or edit tools. The adapter's ordinary lazy connection, authentication, abort handling, and approval gates still apply to every call.
 
 `mcpScript` is a trusted agent-authored MCP scripting layer, not an isolation boundary. If you need isolation, run Pi in an isolated environment. It is distinct from Pi's code-mode skill: Pi's skill batches general Pi tools, while `mcpScript` exposes MCP calls only and can be the child's sole tool.
 
@@ -598,6 +680,24 @@ To set a global default for all servers:
 
 Per-server `directTools` overrides the global setting. The example above registers direct tools for every server except `huge-server`.
 
+### Search-activated direct tools
+
+`directTools: true` puts every tool's definition in front of the model on every turn. Past a few dozen tools that costs context and, on smaller models, accuracy — the advisory at 75 exists for that reason. `directTools: "search"` is the middle path: the tools are registered as real direct tools with real schemas, but **inactive**, and `mcp({ search })` activates the matches additively.
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "directTools": "search"
+    }
+  }
+}
+```
+
+A successful `mcp({ search })` activates matching search-mode tools additively for the process lifetime and reports newly activated names in `addedToolNames`; no other operation activates them. A restart or resumed session starts with them inactive again. Selecting `directTools: true` activates held tools, while switching back to `"search"` holds them again. Search-mode tools do not count toward the 75-tool advisory.
+
 To expose only a subset of a noisy server, add `includeTools` on the server. Values can be exact original names, generated resource names such as `read_<resource>`, prefixed names, or simple glob patterns:
 
 ```json
@@ -630,7 +730,7 @@ To hide specific tools while still using `directTools: true`, add `excludeTools`
 
 Each direct tool costs ~150-300 tokens in the system prompt (name + description + schema). Good for targeted sets of 5-20 tools. For servers with 75+ tools, stick with the proxy or pick specific tools with a `string[]`. If 75+ direct tools resolve, the adapter prints an advisory but still registers the tools you configured. Set `settings.warnOnLargeDirectTools` to `false` to suppress this advisory.
 
-Direct tools register from the metadata cache in the Pi agent dir (`~/.pi/agent/mcp-cache.json` by default, or `$PI_CODING_AGENT_DIR/mcp-cache.json` when set), so no server connections are needed at startup. On the first session after adding `directTools` to a new server, the cache won't exist yet — tools fall back to proxy-only while the cache populates, then the extension hot-loads the refreshed direct tools into the current session. Servers that advertise MCP list-change notifications refresh the current session when their tool or resource list changes. On Pi versions that expose `pi.unregisterTool()`, stale direct tools are removed from the registry during refresh; older Pi versions still deactivate them from the active tool set. To force a refresh: `/mcp reconnect <server>`.
+Direct tools register from the metadata cache in the Pi agent dir (`~/.pi/agent/mcp-cache.json` by default, or `$PI_CODING_AGENT_DIR/mcp-cache.json` when set), so no server connections are needed at startup. On the first session after adding `directTools` to a new server, the cache won't exist yet — tools fall back to proxy-only while the cache populates, then the extension hot-loads the refreshed direct tools into the current session. When `mcp({ connect: "<server>" })` is what discovers them, the connect result lists the new tools in `addedToolNames`, so Pi can load their definitions from that point in the transcript instead of rewriting the active tool list. Servers that advertise MCP list-change notifications refresh the current session when their tool or resource list changes. On Pi versions that expose `pi.unregisterTool()`, stale direct tools are removed from the registry during refresh; older Pi versions still deactivate them from the active tool set. To force a refresh: `/mcp reconnect <server>`.
 
 Models sometimes encode an object or array argument as a JSON string. Set `settings.strictDirectToolArguments` to `true` to recover one such layer for schema-declared object and array properties, then validate the complete input against the advertised schema before execution.
 
@@ -797,7 +897,7 @@ Servers that provide usage guidance via the MCP `instructions` field surface it 
 
 If `settings.autoAuth` is `true`, `mcp({ connect: ... })`, `mcp({ tool: ... })`, and direct tool calls automatically run OAuth when needed and retry once.
 
-In interactive sessions, you can also authenticate from `/mcp` with `ctrl+a` or Enter on a server that needs auth. In remote/headless sessions, use the proxy tool's `auth-start` and `auth-complete` actions to copy the authorization URL locally and paste the redirect URL back into Pi. `/mcp-auth` without a server only opens a picker in the interactive UI.
+In interactive sessions, you can also authenticate from `/mcp` with `ctrl+a` or Enter on a server that needs auth. `/mcp-auth` without a server only opens a picker in the interactive UI. For gateway authorization and manual callback completion, see [Remote/headless OAuth](#remoteheadless-oauth).
 
 ### MCP output schemas
 

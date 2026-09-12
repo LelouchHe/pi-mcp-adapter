@@ -2,7 +2,21 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawnSync } from "node:child_process";
 import { homedir, platform } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
+import stripJsonComments from "strip-json-comments";
 import type { McpConfig, ServerEntry } from "./types.ts";
+
+export function parseJsonWithComments(raw: string): unknown {
+  return JSON.parse(stripJsonComments(raw, { trailingCommas: true }));
+}
+
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
+  if (Array.isArray(value)) {
+    return `[${value.map(item => stableStringify(item)).join(",")}]`;
+  }
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${stableStringify(object[key])}`).join(",")}}`;
+}
 
 async function execOpen(pi: ExtensionAPI, target: string, browser?: string, signal?: AbortSignal) {
   const os = platform();
@@ -64,11 +78,28 @@ export async function parallelLimit<T, R>(
 }
 
 export function getConfigPathFromArgv(): string | undefined {
-  const idx = process.argv.indexOf("--mcp-config");
-  if (idx >= 0 && idx + 1 < process.argv.length) {
-    return process.argv[idx + 1];
+  let configPath: string | undefined;
+  for (let index = 2; index < process.argv.length; index++) {
+    const arg = process.argv[index];
+    if (arg === undefined) continue;
+    if (arg === "--") break;
+
+    if (arg === "--mcp-config") {
+      const value = process.argv[index + 1];
+      if (value !== undefined && !value.startsWith("-") && !value.startsWith("@")) {
+        configPath = value;
+        index++;
+      } else {
+        configPath = undefined;
+      }
+      continue;
+    }
+
+    if (arg.startsWith("--mcp-config=")) {
+      configPath = arg.slice("--mcp-config=".length);
+    }
   }
-  return undefined;
+  return configPath;
 }
 
 export function interpolateEnvVars(value: string): string;
@@ -80,7 +111,7 @@ export function interpolateEnvVars(value: string, environment: NodeJS.ProcessEnv
     .replace(/\{env:(\w+)\}/g, (_, name) => environment[name] ?? "");
 }
 
-function getMissingEnvVars(value: string, environment: NodeJS.ProcessEnv): string[] {
+export function getMissingEnvVars(value: string, environment: NodeJS.ProcessEnv = process.env): string[] {
   const missing = new Set<string>();
   for (const match of value.matchAll(/\$\{(\w+)\}|\$env:(\w+)|\{env:(\w+)\}/g)) {
     const name = match[1] ?? match[2] ?? match[3];

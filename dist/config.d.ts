@@ -8,7 +8,7 @@ export interface KnownServerPreset {
 }
 export declare const KNOWN_SERVER_PRESETS: readonly KnownServerPreset[];
 interface ConfigSourceSpec {
-    id: "shared-global" | "agents-global" | "agents-nested-global" | "pi-global" | "shared-project" | "pi-project";
+    id: "shared-global" | "agents-global" | "agents-nested-global" | "pi-global" | "shared-project-ancestor" | "pi-project-ancestor" | "shared-project" | "pi-project";
     label: string;
     readPath: string;
     writePath: string;
@@ -99,6 +99,8 @@ export declare function getMcpDiscoverySummary(overridePath?: string, cwd?: stri
 }): McpDiscoverySummary;
 export declare function cloneMcpConfig(config: McpConfig): McpConfig;
 export declare function loadMcpConfig(overridePath?: string, cwd?: string): McpConfig;
+export declare function resolveConfiguredClaudePluginMcp(config: McpConfig, cwd?: string): McpConfig;
+export declare function discoverConfiguredClaudePluginSkills(config: McpConfig, cwd?: string): string[];
 export interface ServerDisabledOverrideResult {
     path: string;
     changed: boolean;

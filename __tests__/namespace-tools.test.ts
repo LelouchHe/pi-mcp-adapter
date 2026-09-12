@@ -55,9 +55,9 @@ describe("namespaceProxyName", () => {
 
   it("uses provider-safe namespace names without encoded-form collisions", async () => {
     const { namespaceProxyName } = await importSync();
-    expect(namespaceProxyName("数")).toBe("mcp___mcpns_6570");
+    expect(namespaceProxyName("数")).toBe("mcp___mcpns__6570_");
     expect(namespaceProxyName("_6570_")).toBe("mcp___6570_");
-    expect(namespaceProxyName("_mcpns_6570")).toBe("mcp___mcpns_5f_6d_63_70_6e_73_5f_36_35_37_30");
+    expect(namespaceProxyName("_mcpns_6570")).toBe("mcp___mcpns___mcpns__6570");
     expect(namespaceProxyName("数")).toMatch(/^[A-Za-z0-9_]+$/);
   });
 });
@@ -266,7 +266,7 @@ describe("syncNamespaceProxyTools", () => {
     expect(registered.has("mcp__other")).toBe(false);
   });
 
-  it("exposes a `tool` and optional `args` parameter schema for dispatch", async () => {
+  it("exposes dispatch parameters with search-first describe guidance", async () => {
     const { syncNamespaceProxyTools } = await importSync();
     const { pi, registered } = makePi();
 
@@ -283,13 +283,18 @@ describe("syncNamespaceProxyTools", () => {
     });
 
     const tool = registered.get("mcp__context_mode")!;
-    expect(tool.parameters).toBeDefined();
     expect(tool.parameters).toMatchObject({
       properties: {
         tool: expect.anything(),
-        args: expect.anything(),
+        args: {
+          description: expect.stringMatching(/mcp\(\{ search:.*mcp\(\{ describe:/),
+        },
       },
     });
+    expect(JSON.stringify(tool.parameters)).toContain("exact tool name returned by search");
+    expect(JSON.stringify(tool.parameters)).toContain("When mcp is available");
+    expect(JSON.stringify(tool.parameters)).toContain("to inspect schemas; for unique names use");
+    expect(JSON.stringify(tool.parameters)).not.toContain("server/tool");
   });
 
   it("skips registration when an existing direct tool already uses mcp__<server>", async () => {
@@ -455,7 +460,7 @@ describe("syncNamespaceProxyTools", () => {
       getPiTools: () => [],
     });
 
-    expect(registered.has("mcp___mcpns_6570")).toBe(true);
+    expect(registered.has("mcp___mcpns__6570_")).toBe(true);
     expect(registered.has("mcp___6570_")).toBe(true);
   });
 

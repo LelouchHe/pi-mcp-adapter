@@ -187,6 +187,7 @@ export function resolveDirectTools(
     if (!serverCache || !isServerCacheValid(serverCache, definition)) continue;
 
     let toolFilter: true | string[] | false = false;
+    let lazy = false;
 
     if (envSelection) {
       if (envSelection.servers.has(serverName)) {
@@ -195,10 +196,14 @@ export function resolveDirectTools(
         toolFilter = [...envSelection.tools.get(serverName)!];
       }
     } else {
-      if (definition.directTools !== undefined) {
-        toolFilter = definition.directTools;
-      } else if (globalDirect) {
-        toolFilter = globalDirect;
+      const selected = definition.directTools !== undefined ? definition.directTools : globalDirect;
+      if (selected === "search") {
+        // Real tools with real schemas, but registered inactive; the model
+        // reaches them through mcp({ search }), which activates the matches.
+        toolFilter = true;
+        lazy = true;
+      } else if (selected !== undefined) {
+        toolFilter = selected;
       }
     }
 
@@ -243,6 +248,7 @@ export function resolveDirectTools(
       }
       seenNames.add(prefixedName);
       specs.push({
+        ...(lazy ? { lazy: true } : {}),
         serverName,
         originalName: tool.name,
         prefixedName,
@@ -269,6 +275,7 @@ export function resolveDirectTools(
         }
         seenNames.add(prefixedName);
         specs.push({
+          ...(lazy ? { lazy: true } : {}),
           serverName,
           originalName: baseName,
           prefixedName,
@@ -285,8 +292,10 @@ export function resolveDirectTools(
     ? specs
     : specs.filter((spec) => !unavailableServers.has(spec.serverName));
 
-  if (config.settings?.warnOnLargeDirectTools !== false && emittedSpecs.length >= DIRECT_TOOLS_ADVISORY_THRESHOLD) {
-    console.warn(`MCP: ${emittedSpecs.length} direct tools resolved. Each direct tool adds prompt context; README guidance recommends targeted sets of 5-20 tools and using the proxy or an explicit string[] when 75+ direct tools would be registered. Set settings.warnOnLargeDirectTools to false to hide this advisory.`);
+  // Lazy specs cost nothing at turn start, so they do not count toward the advisory.
+  const eagerCount = emittedSpecs.filter((spec) => !spec.lazy).length;
+  if (config.settings?.warnOnLargeDirectTools !== false && eagerCount >= DIRECT_TOOLS_ADVISORY_THRESHOLD) {
+    console.warn(`MCP: ${eagerCount} direct tools resolved. Each direct tool adds prompt context; README guidance recommends targeted sets of 5-20 tools and using the proxy or an explicit string[] when 75+ direct tools would be registered. Set settings.warnOnLargeDirectTools to false to hide this advisory.`);
   }
 
   return emittedSpecs;
@@ -300,12 +309,23 @@ export function resolveDirectTools(
  * `mcp({ instructions })`.
  */
 export function buildProxyDescription(config: McpConfig): string {
-  let desc = `MCP gateway — server status, tool search/describe, auth, and single MCP tool calls. When one request needs several MCP calls with logic between them, use mcpScript. Non-MCP Pi tools should be called directly, not through mcp.\n`;
+  let desc = `MCP gateway — URL installation, server status, tool search/describe, auth, and single MCP tool calls. When a user supplies an MCP endpoint URL, install it with the install action. When one request needs several MCP calls with logic between them, use mcpScript. Non-MCP Pi tools should be called directly, not through mcp.\n`;
 
   const serverNames = Object.keys(config.mcpServers)
     .filter((serverName) => !isServerDisabled(config.mcpServers[serverName]));
   if (serverNames.length > 0) {
     desc += `\nServers: ${serverNames.join(", ")}\n`;
+  }
+
+  // Search-mode tools are real tools held inactive. Say how they wake up, or
+  // the model reads mcp({ tool }) as the only way in and never gets a schema.
+  const searchModeServers = serverNames.filter((serverName) => {
+    const definition = config.mcpServers[serverName];
+    const selected = definition?.directTools !== undefined ? definition.directTools : config.settings?.directTools;
+    return selected === "search";
+  });
+  if (searchModeServers.length > 0) {
+    desc += `\nSearch-mode servers (${searchModeServers.join(", ")}): their tools become real, schema-backed tools the first time mcp({ search }) matches them — after that, call them directly by name.\n`;
   }
 
   const disabledServers = Object.entries(config.mcpServers)
@@ -316,6 +336,7 @@ export function buildProxyDescription(config: McpConfig): string {
   }
 
   desc += `\nUsage:\n`;
+  desc += `  mcp({ action: "install", url: "https://example.com/mcp" }) → Install, connect, and authenticate an MCP URL\n`;
   desc += `  mcp({ })                              → Show server status and tool counts\n`;
   desc += `  mcp({ server: "name" })               → List tools from server\n`;
   desc += `  mcp({ search: "query" })              → Search MCP tools by name/description\n`;
@@ -324,7 +345,7 @@ export function buildProxyDescription(config: McpConfig): string {
   desc += `  mcp({ connect: "server-name" })       → Connect to a server and refresh metadata\n`;
   desc += `  mcp({ tool: "name", args: { key: "value" } })         → Call a tool (object args; JSON string also accepted)\n`;
   desc += `  mcp({ action: "ui-messages" })        → Retrieve accumulated messages from completed UI sessions\n`;
-  desc += `  mcp({ action: "auth-start", server: "name" })      → Start manual OAuth and get a browser URL\n`;
+  desc += `  mcp({ action: "auth-start", server: "name" })      → Open OAuth and watch for completion\n`;
   desc += `  mcp({ action: "auth-complete", server: "name", args: { redirectUrl: "..." } }) → Complete manual OAuth\n`;
   desc += `\nMode: action > tool (call) > connect > describe > instructions > search > server (list) > nothing (status)`;
 

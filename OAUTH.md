@@ -77,13 +77,13 @@ You can optionally provide a pre-registered client:
 - `oauth.clientSecret` - Client secret for confidential clients (optional)
 - `oauth.scope` - Requested OAuth scopes (optional)
 - `oauth.authorizationParams` - Extra authorization URL parameters for provider-specific extensions, such as Google's `{ "access_type": "offline", "prompt": "consent" }`. Flow-owned parameters like `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge`, `response_type`, and `resource` cannot be overridden.
-- `oauth.redirectUri` - Exact browser callback URI to advertise and bind, such as `http://localhost:3118/callback` (optional)
+- `oauth.redirectUri` - Browser callback URI to advertise and bind, such as `http://localhost:3118/callback`. Use `{port}` in a loopback URI when the provider permits an OS-assigned RFC 8252 port, for example `http://127.0.0.1:{port}/callback` (optional)
 - `oauth.clientName` - Client display name used for Dynamic Client Registration fallback (optional, defaults to `Pi Coding Agent`)
 - `oauth.clientUri` - Client homepage URI used for Dynamic Client Registration fallback (optional)
 - `oauth.authServerMetadataUrl` - HTTPS OAuth/OIDC authorization-server metadata document to use authoritatively when MCP protected-resource discovery is unavailable (optional; issuer validation remains enabled)
 - `oauth.skipIssuerMetadataValidation` - Set `true` only for a known-misconfigured authorization server whose metadata issuer cannot be fixed immediately. This weakens OAuth issuer validation.
 
-Dynamic fallback clients normally omit `oauth.redirectUri`; the adapter starts the callback server lazily on the default loopback host (`localhost`) and asks the OS for an available local port when auth begins. Use `oauth.redirectUri` when the provider requires a pre-registered callback, such as Slack MCP's Claude-compatible `http://localhost:3118/callback`. The URI must use `http://` with `localhost`, `127.0.0.1`, or `[::1]`, include an explicit port, and its host/path become the bound callback endpoint.
+Dynamic fallback clients normally omit `oauth.redirectUri`; the adapter starts the callback server lazily on the default loopback host (`localhost`) and asks the OS for an available local port when auth begins. Use `oauth.redirectUri` when the provider requires a pre-registered callback, such as Slack MCP's Claude-compatible `http://localhost:3118/callback`. A loopback URI must use `http://` with `localhost`, `127.0.0.1`, or `[::1]`. It may contain an explicit port, which is bound exactly, or `{port}`, which is replaced with the OS-assigned port in the authorization and token requests.
 
 ### Non-Interactive `client_credentials`
 
@@ -121,7 +121,7 @@ Run the `/mcp-auth` command with the server name:
 Manual `/mcp-auth` is the default flow. If you set `settings.autoAuth: true`, proxy/direct tool execution will trigger OAuth automatically when a server returns `needs-auth`, then retry the original operation once.
 
 This will:
-1. Start the callback server lazily on an OS-assigned local port, or on the exact `oauth.redirectUri` port for pre-registered callbacks
+1. Start the callback server lazily on an OS-assigned local port, on an OS-assigned host-specific `{port}` callback, or on the exact `oauth.redirectUri` port for fixed callbacks
 2. Discover OAuth endpoints automatically
 3. Use Dynamic Client Registration fallback when no `clientId` is configured and the server supports registration
 4. Open your browser for authentication
@@ -219,12 +219,30 @@ A Node.js HTTP server runs on a loopback callback endpoint and handles the activ
 
 - Dynamic registration starts the callback server only when auth begins, binds the default host `localhost`, and asks the OS for an available local port
 - Pre-registered clients (`oauth.clientId`) without `oauth.redirectUri` require the exact configured callback port from `MCP_OAUTH_CALLBACK_PORT` or the default `19876` on `localhost`
-- `oauth.redirectUri` binds the exact loopback host, port, and path from that URI and advertises the same URI to the provider
+- `oauth.redirectUri` binds the exact loopback host and path. An explicit port is bound exactly; `{port}` asks the OS for a port and is replaced with that assigned value before the URI is advertised to the provider
 
 - Handles `code`, `state`, and `error` parameters
 - Displays success/error HTML pages
 - Validates state parameter for CSRF protection
 - Has a 5-minute timeout for pending authorizations
+
+## Shared credential transactions
+
+SDK auth invocations run inside a credential transaction, including discovery, refresh, invalidation/retry, and callback exchange. The transaction ends when auth returns `AUTHORIZED`, returns `REDIRECT`, or throws; it does not span browser consent. Startup cleanup and logout use short transactions against the same credential identity.
+
+Ownership uses `fs-native-extensions` kernel advisory locks on permanent files under the OS user's home (`.pi-mcp-adapter/refresh-locks-v2`). Lock identity follows the credential store's server-name account, not the configurable legacy OAuth import directory. Files are never deleted or reclaimed; process death releases ownership in the kernel. Every process sharing credentials must use this implementation. Old directory-lock builds do not coordinate with it and must be restarted.
+
+Waiting acquisition is cancellable. Deactivating a provider aborts its auth fetches but does not release ownership before the underlying operation settles. A rotated response already received is persisted before release. Auth fetches have the configured `PI_MCP_OAUTH_REQUEST_TIMEOUT_MS` deadline (30 seconds by default), including configured discovery; ordinary MCP streaming requests are not given that deadline.
+
+Concurrent processes may still perform successive refreshes after rereading the latest token. This serializes redemption; it does not claim cross-process deduplication. A process crash after remote rotation but before local persistence can still require reauthorization. Native lock support and cooperative access by all credential writers are required; the public token writer participates in the same transaction boundary.
+
+This development branch pins SDK client/core previews to one immutable commit because `withAuthTransaction` is not yet released. Replace both preview dependencies with the supporting SDK release before publishing a stable adapter release.
+
+### Opt-in diagnostics
+
+Set `PI_MCP_OAUTH_LOG` to an absolute JSONL file path before launching Pi. Records include PID, transaction ID, server name, wait/total duration, and terminal result. They exclude token values, client secrets, authorization codes, endpoint URLs, and raw error messages. Logging failure never changes authentication behavior.
+
+Events are `oauth_transaction_waiting`, `oauth_transaction_acquired`, `oauth_transaction_completed`, and `oauth_transaction_failed`. Check the completed event's `result` for `AUTHORIZED` or `REDIRECT`.
 
 ## Token Storage
 
@@ -303,7 +321,7 @@ Some servers require pre-registered clients. Obtain a client ID from your OAuth 
 
 Dynamic fallback browser OAuth uses a lazy OS-assigned port on the default loopback host (`localhost`), so the configured default port being busy should not block fallback registration.
 
-For pre-registered OAuth clients (`oauth.clientId`), the callback redirect URI must match exactly. Set `oauth.redirectUri` to the full registered callback, such as Slack MCP's Claude-compatible `http://localhost:3118/callback`, or free/set `MCP_OAUTH_CALLBACK_PORT` when you rely on the default `/callback` path without an explicit redirect URI.
+For pre-registered OAuth clients (`oauth.clientId`), the callback redirect URI must match the provider registration policy. Set `oauth.redirectUri` to the full fixed callback, such as Slack MCP's Claude-compatible `http://localhost:3118/callback`, use a loopback `{port}` URI when the provider explicitly permits dynamic RFC 8252 ports, or free/set `MCP_OAUTH_CALLBACK_PORT` when you rely on the default `/callback` path without an explicit redirect URI.
 
 ### Browser doesn't open
 

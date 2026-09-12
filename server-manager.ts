@@ -1,13 +1,16 @@
 import { mkdirSync, statSync } from "node:fs";
+import { BlockList, isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import {
   Client,
   SdkError,
   SdkErrorCode,
   SdkHttpError,
+  SseError,
   SSEClientTransport,
   StreamableHTTPClientTransport,
   UnauthorizedError,
+  type FetchLike,
   type GetPromptResult,
   type ListToolsResult,
   type ReadResourceResult,
@@ -40,6 +43,7 @@ import { logger } from "./logger.ts";
 import { RESOURCE_MIME_TYPE } from "./ui-app-bridge-helpers.ts";
 import { McpOAuthProvider } from "./mcp-oauth-provider.ts";
 import { extractOAuthConfig, supportsOAuth, type McpOAuthRuntime } from "./mcp-auth-flow.ts";
+import { createOAuthAwareFetch } from "./mcp-auth-fetch.ts";
 import { inspectAuthForUrl, invalidateAuthEntryCache, type AuthStorageOptions } from "./mcp-auth.ts";
 import { getBearerTokenForUrl } from "./mcp-bearer-store.ts";
 import { registerSamplingHandler, type ServerSamplingConfig } from "./sampling-handler.ts";
@@ -66,7 +70,9 @@ import {
   traceTransportKind,
   wrapTransportWithMcpTrace,
 } from "./mcp-trace.ts";
+import { createOAuthFetch, resolveOAuthHeaders } from "./mcp-auth-fetch.ts";
 import { createRequestHeadersCommandFetch } from "./request-headers-command.ts";
+import { createCaFetch, validateCaFile } from "./http-ca.ts";
 
 const MAX_CAPTURED_STDERR_BYTES = 8 * 1024;
 const MAX_CAPTURED_STDERR_LINES = 3;
@@ -78,6 +84,35 @@ type HttpAuthProviderState =
   | { status: "implicit-stored"; provider: McpOAuthProvider }
   | { status: "explicit"; provider: McpOAuthProvider }
   | { status: "implicit-challenged"; provider: McpOAuthProvider };
+
+function isLiteralLocalAddress(url: string): boolean {
+  const hostname = new URL(url).hostname.replace(/^\[|\]$/g, "");
+  const family = isIP(hostname);
+  if (!family) return false;
+  const local = new BlockList();
+  local.addSubnet("10.0.0.0", 8);
+  local.addSubnet("172.16.0.0", 12);
+  local.addSubnet("192.168.0.0", 16);
+  local.addSubnet("169.254.0.0", 16);
+  local.addSubnet("fc00::", 7, "ipv6");
+  local.addSubnet("fe80::", 10, "ipv6");
+  return local.check(hostname, family === 6 ? "ipv6" : "ipv4");
+}
+
+function localNetworkFailureCodes(error: unknown, seen = new Set<object>()): string[] {
+  if (typeof error !== "object" || error === null || seen.has(error)) return [];
+  seen.add(error);
+  const codes: string[] = [];
+  if ("code" in error && typeof error.code === "string"
+    && ["EHOSTUNREACH", "ENETUNREACH", "EACCES"].includes(error.code)) {
+    codes.push(error.code);
+  }
+  if ("cause" in error) codes.push(...localNetworkFailureCodes(error.cause, seen));
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) codes.push(...localNetworkFailureCodes(nested, seen));
+  }
+  return [...new Set(codes)];
+}
 
 function isUnauthorizedHttpError(error: unknown): boolean {
   return error instanceof UnauthorizedError || (error instanceof SdkHttpError && error.status === 401);
@@ -305,6 +340,7 @@ export class McpServerManager {
   }
 
   async connect(name: string, definition: ServerDefinition, signal?: AbortSignal): Promise<ServerConnection> {
+    validateCaFile(definition);
     if (isServerDisabled(definition)) throw new Error(`MCP server "${name}" is disabled`);
     if (this.stopped) throw new Error("MCP server manager is closed");
     const ownedSignal = combineAbortSignals(this.runtimeSignal, signal);
@@ -817,7 +853,12 @@ export class McpServerManager {
       const stdioTransport = new StdioClientTransport({
         command,
         args,
-        env: resolveEnv(definition.env, name, definition.literalEnv === true),
+        env: resolveEnv(
+          definition.env,
+          name,
+          definition.literalEnv === true,
+          definition.inheritEnv !== false,
+        ),
         ...(cwd !== undefined ? { cwd } : {}),
         stderr: definition.debug ? "inherit" : "pipe",
       });
@@ -977,6 +1018,12 @@ export class McpServerManager {
 
   private async enrichHttpConnectionError(definition: ServerDefinition, error: unknown): Promise<Error> {
     const originalMessage = error instanceof Error ? error.message : String(error);
+    if (process.platform === "darwin") {
+      const codes = localNetworkFailureCodes(error);
+      if (codes.length > 0 && isLiteralLocalAddress(resolveServerUrl(definition)!)) {
+        return new Error(`${originalMessage} — ${codes.join(", ")} — macOS Local Network Privacy may be blocking access. Check System Settings > Privacy & Security > Local Network for the app hosting Pi; enable access if listed and restart it. Try launching Pi from Terminal.app or SSH. Routing or firewall problems can also cause this error.`, { cause: error });
+      }
+    }
     if (isTransientHttpConnectError(error)) {
       return new Error(`${originalMessage} — endpoint is temporarily unavailable (HTTP 503)`, { cause: error });
     }
@@ -1188,10 +1235,13 @@ export class McpServerManager {
     // mutating the persisted configuration.
     const hasCommandHeader = Object.values(definition.headers ?? {})
       .some(value => value.startsWith("!") && !value.startsWith("!!"));
-    const headers = resolveCommandSecretsRecord(
-      definition.headers,
-      key => `MCP server "${serverName}" HTTP header "${key}"`,
-    ) ?? {};
+    const oauthEnabled = supportsOAuth(definition);
+    const headers = oauthEnabled
+      ? Object.fromEntries(resolveOAuthHeaders(definition.headers))
+      : resolveCommandSecretsRecord(
+        definition.headers,
+        key => `MCP server "${serverName}" HTTP header "${key}"`,
+      ) ?? {};
 
     // Resolve bearer auth before creating requestInit so every attempted
     // transport receives the same headers.
@@ -1216,18 +1266,27 @@ export class McpServerManager {
       }
     }
 
-    const requestInit = Object.keys(headers).length > 0 ? { headers } : undefined;
-    const requestFetch = definition.requestHeadersCommand
-      ? createRequestHeadersCommandFetch(definition.requestHeadersCommand)
-      : undefined;
-    const createAuthProvider = (): McpOAuthProvider => new McpOAuthProvider(
-      serverName,
-      serverUrl,
-      extractOAuthConfig(definition),
-      { onRedirect: async () => {} },
-      this.authStorageOptions,
-      this.oauthRuntime?.signal,
-    );
+    // Do not give origin-bound headers to SDK requestInit: it reuses those
+    // defaults for discovered OAuth endpoints, including other origins.
+    const requestInit = !oauthEnabled && Object.keys(headers).length > 0 ? { headers } : undefined;
+    const serviceHeaders = oauthEnabled ? new Headers(headers) : new Headers();
+    let caFetch = createCaFetch(definition);
+    try {
+    const createAuthProvider = (): McpOAuthProvider => {
+      const provider = new McpOAuthProvider(
+        serverName,
+        serverUrl,
+        extractOAuthConfig(definition),
+        { onRedirect: async () => {} },
+        this.authStorageOptions,
+        this.oauthRuntime?.signal,
+      );
+      provider.setAuthFetch(createOAuthFetch(serverUrl, () => serviceHeaders,
+        combineAbortSignals(this.oauthRuntime?.signal, signal), {
+          ...(caFetch ? { delegate: caFetch.fetch } : {}),
+        }));
+      return provider;
+    };
 
     // Explicit OAuth checks secure storage immediately. Implicit OAuth keeps
     // anonymous servers provider-free unless URL-bound credentials are already
@@ -1252,6 +1311,16 @@ export class McpServerManager {
         : { status: "explicit", provider: createAuthProvider() }
       : { status: "disabled" };
 
+    const commandFetch = definition.requestHeadersCommand
+      ? createRequestHeadersCommandFetch(definition.requestHeadersCommand, caFetch?.fetch)
+      : caFetch?.fetch;
+    const requestFetch = oauthEnabled
+      ? createOAuthFetch(serverUrl, () => serviceHeaders, this.oauthRuntime?.signal, {
+        // MCP streams outlive individual auth requests; retain SDK request deadlines.
+        timeout: false,
+        ...(commandFetch ? { delegate: commandFetch } : {}),
+      })
+      : commandFetch;
     const attempt = async (
       kind: "streamable-http" | "sse",
     ): Promise<
@@ -1259,10 +1328,23 @@ export class McpServerManager {
       | { status: "failed"; client: Client; transport: Transport; error: unknown }
     > => {
       const authProvider = "provider" in authState ? authState.provider : undefined;
+      let sseFetchFailure: unknown;
+      const transportFetch: FetchLike | undefined = kind === "sse" && process.platform === "darwin" && isLiteralLocalAddress(serverUrl)
+        ? async (input, init) => {
+          try {
+            return await (requestFetch ?? globalThis.fetch)(input, init);
+          } catch (error) {
+            // EventSource discards the fetch cause before the SDK creates SseError.
+            if (localNetworkFailureCodes(error).length > 0) sseFetchFailure = error;
+            throw error;
+          }
+        }
+        : requestFetch;
       const transportOptions = {
         ...(requestInit !== undefined ? { requestInit } : {}),
-        ...(requestFetch !== undefined ? { fetch: requestFetch } : {}),
-        ...(authProvider !== undefined ? { authProvider } : {}),
+        ...(authProvider !== undefined
+          ? { fetch: createOAuthAwareFetch(transportFetch), authProvider }
+          : transportFetch !== undefined ? { fetch: transportFetch } : {}),
         ...(authProvider !== undefined
           && definition.oauth !== false
           && definition.oauth?.skipIssuerMetadataValidation === true
@@ -1281,6 +1363,9 @@ export class McpServerManager {
         await this.connectClientWithAbort(client, transport, requestOptions, signal);
         return { status: "connected", client, transport };
       } catch (error) {
+        if (error instanceof SseError && sseFetchFailure !== undefined) {
+          error = new AggregateError([error, sseFetchFailure], error.message);
+        }
         const abortCleanupFailed = error instanceof AggregateError
           && error.message === "MCP connection abort cleanup failed";
         if (!abortCleanupFailed) {
@@ -1301,7 +1386,24 @@ export class McpServerManager {
     let invalidated = credentialsInvalidated;
     for (;;) {
       const result = await attempt(kind);
-      if (result.status === "connected") return { ...result, credentialsInvalidated: invalidated };
+      if (result.status === "connected") {
+        const ownedCa = caFetch;
+        if (ownedCa) {
+          const close = result.transport.close.bind(result.transport);
+          const onclose = result.transport.onclose;
+          result.transport.onclose = () => {
+            void ownedCa.close().catch(error => {
+              logger.debug(`MCP: CA dispatcher cleanup failed for ${serverName}: ${String(error)}`);
+            });
+            onclose?.();
+          };
+          result.transport.close = async () => {
+            try { await close(); } finally { await ownedCa.close(); }
+          };
+          caFetch = undefined;
+        }
+        return { ...result, credentialsInvalidated: invalidated };
+      }
       if (result.error instanceof AggregateError
         && result.error.message === "MCP connection abort cleanup failed") {
         throw result.error;
@@ -1333,6 +1435,9 @@ export class McpServerManager {
         continue;
       }
       throw result.error;
+    }
+    } finally {
+      await caFetch?.close();
     }
   }
 
@@ -1634,10 +1739,17 @@ export class McpServerManager {
 /**
  * Resolve environment variables with interpolation.
  */
-function resolveEnv(env: Record<string, string> | undefined, serverName: string, literalEnv = false): Record<string, string> {
+function resolveEnv(
+  env: Record<string, string> | undefined,
+  serverName: string,
+  literalEnv = false,
+  inheritEnv = true,
+): Record<string, string> {
   const resolved: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) resolved[key] = value;
+  if (inheritEnv) {
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined) resolved[key] = value;
+    }
   }
   if (literalEnv) return env ? { ...resolved, ...env } : resolved;
 
