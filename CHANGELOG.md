@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- MCP stdio server commands, arguments, and working directories support home-relative paths. Thanks to [@FRFlo](https://github.com/FRFlo) for [PR #655](https://github.com/nicobailon/pi-mcp-adapter/pull/655).
 - Set `MCP_UI_VIEWER=orca` to open MCP UI windows in Orca. Thanks to [@jaesimio](https://github.com/jaesimio) for [PR #654](https://github.com/nicobailon/pi-mcp-adapter/pull/654).
 
 ### Fixed
