@@ -314,8 +314,15 @@ describe("MCP 2026-07-28 SDK-native multi-round input flows", () => {
     const pendingInput = new Promise<string | undefined>((resolve) => {
       releaseInput = resolve;
     });
+    let resolveSelectCalled!: () => void;
+    const selectCalled = new Promise<void>((resolve) => {
+      resolveSelectCalled = resolve;
+    });
     const ui = {
-      select: vi.fn(() => pendingInput),
+      select: vi.fn(() => {
+        resolveSelectCalled();
+        return pendingInput;
+      }),
       input: vi.fn(async () => undefined),
       notify: vi.fn(),
     };
@@ -347,7 +354,7 @@ describe("MCP 2026-07-28 SDK-native multi-round input flows", () => {
     const controller = new AbortController();
     const call = executeCall(state, "mrtr_abort_pending", {}, "mrtr", undefined, controller.signal);
 
-    for (let i = 0; i < 20 && ui.select.mock.calls.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    await selectCalled;
     expect(ui.select).toHaveBeenCalledOnce();
     controller.abort(new Error("user cancelled"));
     const result = await call;

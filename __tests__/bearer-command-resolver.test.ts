@@ -1,13 +1,41 @@
+import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { promisify } from "node:util";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BearerCommandResolver } from "../bearer-command-resolver.ts";
 
 function shellArg(value: string): string {
   return process.platform === "win32"
     ? `"${value.replace(/"/g, '""')}"`
     : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function waitForProcessExit(pidFile: string): Promise<void> {
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  await vi.waitFor(async () => {
+    if (process.platform === "win32") {
+      let running = false;
+      try {
+        process.kill(pid, 0);
+        running = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+      expect(running).toBe(false);
+      return;
+    }
+    let stdout: string;
+    try {
+      ({ stdout } = await promisify(execFile)("ps", ["-o", "stat=", "-p", String(pid)]));
+    } catch (error) {
+      const psError = error as NodeJS.ErrnoException & { stderr?: string };
+      if (psError.code === 1 && !psError.stderr?.trim()) return;
+      throw error;
+    }
+    expect(stdout.trim() === "" || stdout.trim().startsWith("Z")).toBe(true);
+  }, { interval: 10, timeout: 4_000 });
 }
 
 describe("BearerCommandResolver", () => {
@@ -21,7 +49,7 @@ describe("BearerCommandResolver", () => {
     writeFileSync(fixture, `
 const fs = require("node:fs");
 const [counter, failMarker, started, completed, delay = "0"] = process.argv.slice(2);
-if (started !== "-") fs.writeFileSync(started, "started");
+if (started !== "-") fs.writeFileSync(started, String(process.pid));
 const count = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) + 1 : 1;
 fs.writeFileSync(counter, String(count));
 if (failMarker !== "-" && fs.existsSync(failMarker)) process.exit(2);
@@ -122,7 +150,7 @@ setTimeout(() => {
     while (!existsSync(started)) await new Promise(resolve => setTimeout(resolve, 10));
     controller.abort(new Error("cancelled during refresh"));
     await expect(pending).rejects.toThrow("cancelled during refresh");
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await waitForProcessExit(started);
     expect(existsSync(completed)).toBe(false);
     expect(await resolver.resolve()).toBe("jwt-2");
   });
