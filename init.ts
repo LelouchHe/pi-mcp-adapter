@@ -268,13 +268,51 @@ export async function initializeMcp(
   const allServerEntries = Object.entries(config.mcpServers);
   const serverEntries = allServerEntries.filter(([, definition]) => !isServerDisabled(definition));
 
-  // The lifecycle loop also serves runtime-registered servers, so it starts
-  // whenever the adapter does. Returning early for a config that declares no
-  // servers would otherwise leave a runtime-only install — one whose every MCP
-  // server arrives through runtime registration — with no idle cleanup and no
-  // keep-alive recovery at all.
+  // The lifecycle loop serves runtime-registered servers too, so it is wired and
+  // started whenever the adapter initializes. Returning early for a config that
+  // declares no servers would otherwise leave a runtime-only install — one whose
+  // every MCP server arrives through runtime registration — with no idle
+  // cleanup, no keep-alive recovery, and no metadata republication after a
+  // reconnect, which made every `lifecycle`/`idleTimeout` setting inert and left
+  // a recovered server registering no tools and reporting zero of them.
   const idleSetting = typeof config.settings?.idleTimeout === "number" ? config.settings.idleTimeout : 10;
   lifecycle.setGlobalIdleTimeout(idleSetting);
+
+  lifecycle.setReconnectCallback((serverName) => {
+    if (!owner.isActive()) return;
+    updateServerMetadata(state, serverName);
+    updateMetadataCache(state, serverName);
+    const restored = clearFailure(state, serverName, "lifecycle-reconnect");
+    if (!restored) notifyToolMetadataUpdated(state, serverName, "lifecycle-reconnect");
+    updateStatusBar(state);
+  });
+
+  lifecycle.setReconnectFailureCallback((serverName, error) => {
+    if (!owner.isActive()) return;
+    const message = error instanceof Error ? error.message : String(error);
+    recordFailure(state, serverName, message);
+    updateStatusBar(state);
+  });
+
+  lifecycle.setHealthRestoredCallback((serverName) => {
+    if (!owner.isActive()) return;
+    clearFailure(state, serverName, "health-restored");
+    updateStatusBar(state);
+  });
+
+  lifecycle.setAuthRequiredCallback((serverName) => {
+    if (!owner.isActive()) return;
+    clearFailure(state, serverName, "auth-required");
+    updateStatusBar(state);
+  });
+
+  lifecycle.setIdleShutdownCallback((serverName) => {
+    if (!owner.isActive()) return;
+    const idleMinutes = getEffectiveIdleTimeoutMinutes(state, serverName);
+    logger.debug(`${serverName} shut down (idle ${idleMinutes}m)`);
+    updateStatusBar(state);
+  });
+
   owner.throwIfInactive();
   lifecycle.startHealthChecks(runtimeSignal);
 
@@ -490,41 +528,6 @@ export async function initializeMcp(
       }
     }
   }
-
-  lifecycle.setReconnectCallback((serverName) => {
-    if (!owner.isActive()) return;
-    updateServerMetadata(state, serverName);
-    updateMetadataCache(state, serverName);
-    const restored = clearFailure(state, serverName, "lifecycle-reconnect");
-    if (!restored) notifyToolMetadataUpdated(state, serverName, "lifecycle-reconnect");
-    updateStatusBar(state);
-  });
-
-  lifecycle.setReconnectFailureCallback((serverName, error) => {
-    if (!owner.isActive()) return;
-    const message = error instanceof Error ? error.message : String(error);
-    recordFailure(state, serverName, message);
-    updateStatusBar(state);
-  });
-
-  lifecycle.setHealthRestoredCallback((serverName) => {
-    if (!owner.isActive()) return;
-    clearFailure(state, serverName, "health-restored");
-    updateStatusBar(state);
-  });
-
-  lifecycle.setAuthRequiredCallback((serverName) => {
-    if (!owner.isActive()) return;
-    clearFailure(state, serverName, "auth-required");
-    updateStatusBar(state);
-  });
-
-  lifecycle.setIdleShutdownCallback((serverName) => {
-    if (!owner.isActive()) return;
-    const idleMinutes = getEffectiveIdleTimeoutMinutes(state, serverName);
-    logger.debug(`${serverName} shut down (idle ${idleMinutes}m)`);
-    updateStatusBar(state);
-  });
 
   owner.throwIfInactive();
   if (config.settings?.mcpFooterStatus === "off") {

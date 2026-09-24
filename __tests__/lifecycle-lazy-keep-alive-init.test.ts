@@ -135,6 +135,10 @@ describe("lazy-keep-alive initializeMcp integration", () => {
     mocks.config = { settings: {}, mcpServers };
     const { McpLifecycleManager } = await import("../lifecycle.ts");
     const startSpy = vi.spyOn(McpLifecycleManager.prototype, "startHealthChecks");
+    // Starting the loop is not enough: a reconnect must publish metadata again,
+    // otherwise a recovered server registers no tools and reports zero of them.
+    const reconnectSpy = vi.spyOn(McpLifecycleManager.prototype, "setReconnectCallback");
+    const idleSpy = vi.spyOn(McpLifecycleManager.prototype, "setIdleShutdownCallback");
     const { initializeMcp } = await import("../init.ts");
 
     await initializeMcp({ getFlag: vi.fn(() => undefined) } as any, {
@@ -144,6 +148,8 @@ describe("lazy-keep-alive initializeMcp integration", () => {
     } as any);
 
     expect(startSpy).toHaveBeenCalledTimes(1);
+    expect(reconnectSpy).toHaveBeenCalledWith(expect.any(Function));
+    expect(idleSpy).toHaveBeenCalledWith(expect.any(Function));
   });
 
   it("provides all successful startup metadata for collision filtering", async () => {
