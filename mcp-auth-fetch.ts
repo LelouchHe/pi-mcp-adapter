@@ -1,5 +1,4 @@
 import type { FetchLike } from "@modelcontextprotocol/client"
-import { currentAuthTransaction } from "./mcp-auth.ts"
 import { combineAbortSignals } from "./runtime-owner.ts"
 import { interpolateEnvRecord, resolveCommandSecretsRecord } from "./utils.ts"
 
@@ -8,7 +7,11 @@ import { interpolateEnvRecord, resolveCommandSecretsRecord } from "./utils.ts"
  * TypeError is fatal to the native SDK's fresh and cached discovery paths; ordinary
  * errors can be swallowed and allow authentication to continue without credentials.
  */
-export function resolveOAuthHeaders(values: Record<string, string> | undefined, commands = true): Headers {
+type OAuthHeaderOptions = { commands?: boolean; literal?: boolean }
+
+export function resolveOAuthHeaders(values: Record<string, string> | undefined, options: OAuthHeaderOptions = {}): Headers {
+  const { commands = true, literal = false } = options
+  if (literal) return new Headers(values)
   const selected = Object.fromEntries(Object.entries(values ?? {}).filter(([, value]) =>
     commands || !value.startsWith("!") || value.startsWith("!!")))
   for (const value of Object.values(selected)) {
@@ -93,33 +96,18 @@ export function createOAuthFetch(
 }
 
 /** Cache success or failure only in the owning auth leg/connection, never in storage. */
-export function oauthHeaderResolver(values: Record<string, string> | undefined): () => Headers {
+export function oauthHeaderResolver(values: Record<string, string> | undefined, options: Pick<OAuthHeaderOptions, "literal"> = {}): () => Headers {
   const snapshot = values ? { ...values } : undefined
   let result: { headers: Headers } | { error: unknown } | undefined
   return () => {
     if (!result) {
       try {
-        result = { headers: resolveOAuthHeaders(snapshot) }
+        result = { headers: resolveOAuthHeaders(snapshot, options) }
       } catch (error) {
         result = { error }
       }
     }
     if ("error" in result) throw result.error
     return result.headers
-  }
-}
-
-export function authFetch(signal?: AbortSignal, baseFetch: FetchLike = fetch): FetchLike {
-  return (url, init) => {
-    const requestSignal = url instanceof Request ? url.signal : undefined
-    const combined = combineAbortSignals(signal, AbortSignal.timeout(resolveOAuthRequestTimeoutMs()), init?.signal ?? requestSignal)
-    return baseFetch(url, { ...init, ...(combined ? { signal: combined } : {}) })
-  }
-}
-
-export function createOAuthAwareFetch(baseFetch: FetchLike = fetch): FetchLike {
-  return (url, init) => {
-    const transaction = currentAuthTransaction()
-    return transaction ? authFetch(transaction.signal, baseFetch)(url, init) : baseFetch(url, init)
   }
 }

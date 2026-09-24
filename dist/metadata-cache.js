@@ -3,8 +3,9 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "
 import { dirname } from "node:path";
 import { getAgentPath } from "./agent-dir.js";
 import { createHash } from "node:crypto";
+import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.js";
 import { getToolUiResourceUri } from "./ui-app-bridge-helpers.js";
-import { createToolSelectorCandidateIndex, formatPromptCommandName, formatToolName, getToolNameCandidates, isServerDisabled, isToolAllowed, resolveToolPrefix } from "./types.js";
+import { createToolSelectorCandidateIndex, formatPromptCommandName, formatToolName, getToolNameCandidates, isServerDisabled, isToolAllowed, resolveToolPrefix, resolveUniqueNameOwnership } from "./types.js";
 import { resourceNameToToolName } from "./resource-tools.js";
 import { extractToolUiStreamMode, interpolateEnvRecord, interpolateEnvVars, resolveBearerToken, resolveConfigPath, resolveServerUrl, stableStringify, } from "./utils.js";
 import { extractUiToolVisibility, isUiToolVisibleToModel } from "./ui-tool-visibility.js";
@@ -61,10 +62,10 @@ export function computeServerHash(definition, environment = process.env) {
         command: definition.command,
         args: definition.args,
         socket: resolveConfigPath(definition.socket, environment),
-        env: interpolateEnvRecord(definition.env, environment),
-        cwd: resolveConfigPath(definition.cwd, environment),
+        env: isBuiltInAgentPlugin(definition, "env") ? definition.env : interpolateEnvRecord(definition.env, environment),
+        cwd: isBuiltInAgentPlugin(definition, "cwd") ? definition.cwd : resolveConfigPath(definition.cwd, environment),
         url: resolveServerUrl(definition, environment),
-        headers: interpolateEnvRecord(definition.headers, environment),
+        headers: isBuiltInAgentPlugin(definition, "headers") ? definition.headers : interpolateEnvRecord(definition.headers, environment),
         requestHeadersCommand: definition.requestHeadersCommand
             ? {
                 command: interpolateEnvVars(definition.requestHeadersCommand.command, environment),
@@ -153,7 +154,6 @@ export function getMissingConfiguredDirectToolServers(config, cache, envOverride
 }
 export function reconstructToolMetadata(serverName, entry, prefix, definition, configuredServers, cache, sharedSelectorCandidateIndex) {
     const metadata = [];
-    const seenNames = new Set();
     const effectivePrefix = resolveToolPrefix(definition, prefix);
     const hasToolFilters = (Array.isArray(definition.includeTools) && definition.includeTools.length > 0) ||
         (Array.isArray(definition.excludeTools) && definition.excludeTools.length > 0);
@@ -172,10 +172,6 @@ export function reconstructToolMetadata(serverName, entry, prefix, definition, c
             continue;
         }
         const name = formatToolName(tool.name, serverName, effectivePrefix);
-        if (seenNames.has(name)) {
-            continue;
-        }
-        seenNames.add(name);
         metadata.push({
             name,
             originalName: tool.name,
@@ -196,10 +192,6 @@ export function reconstructToolMetadata(serverName, entry, prefix, definition, c
                 continue;
             }
             const name = formatToolName(baseName, serverName, effectivePrefix);
-            if (seenNames.has(name)) {
-                continue;
-            }
-            seenNames.add(name);
             metadata.push({
                 name,
                 originalName: baseName,
@@ -208,7 +200,7 @@ export function reconstructToolMetadata(serverName, entry, prefix, definition, c
             });
         }
     }
-    return metadata;
+    return resolveUniqueNameOwnership(metadata, (tool) => tool.name).unique;
 }
 export function createCachedToolSelectorCandidateIndex(configuredServers, cache, prefix) {
     const candidates = new Set();

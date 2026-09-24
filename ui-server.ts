@@ -19,10 +19,11 @@ import {
   SANDBOX_RESOURCE_PATH_PREFIX,
 } from "./sandbox-proxy-template.ts";
 import { logger } from "./logger.ts";
-import type { McpServerManager } from "./server-manager.ts";
+import type { McpServerManager, ServerConnection } from "./server-manager.ts";
 import type { McpExtensionState } from "./state.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery, type SessionRecoveryDeps } from "./session-recovery.ts";
 import { ensureToolCallApproved, isToolCallApprovalRequired } from "./tool-approval.ts";
+import { callToolViaTaskSession } from "./mcp-tasks.ts";
 import { extractUiToolVisibility, isUiToolCallableByApp, isUiToolVisibleToModel } from "./ui-tool-visibility.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import {
@@ -87,6 +88,7 @@ export interface UiServerOptions {
 export async function startUiServer(options: UiServerOptions): Promise<UiServerHandle> {
   const sessionToken = options.sessionToken ?? randomUUID();
   const sandboxResourcePath = `${SANDBOX_RESOURCE_PATH_PREFIX}${randomUUID()}`;
+  const resourceAllow = buildAllowAttribute(options.resource.meta.permissions);
   const log = logger.child({ 
     component: "UiServer",
     server: options.serverName,
@@ -355,7 +357,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
           toolName: options.toolName,
           toolArgs: options.toolArgs,
           resource: options.resource,
-          allowAttribute: buildAllowAttribute(options.resource.meta.permissions),
+          allowAttribute: resourceAllow,
           requireToolConsent: options.consentManager.requiresPrompt(options.serverName),
           cacheToolConsent: options.consentManager.shouldCacheConsent(),
           hostContext,
@@ -529,6 +531,19 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
         try {
           options.manager.touch(options.serverName);
           options.manager.incrementInFlight(options.serverName);
+          const callTool = async (conn: ServerConnection) => {
+            await options.manager.ensureListen?.(options.serverName, conn);
+            const requestOptions = options.manager.getRequestOptions?.(options.serverName);
+            if (conn.taskSession) {
+              return callToolViaTaskSession(conn.taskSession, {
+                name: callArgs.name,
+                args: callArgs.arguments,
+                requestTimeoutMs: requestOptions?.timeout,
+                signal: requestOptions?.signal,
+              });
+            }
+            return conn.client.callTool(callArgs, requestOptions);
+          };
           const result = options.config
             ? await withSessionRecovery(
                 {
@@ -537,15 +552,9 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
                   ...(options.onNeedsAuth ? { onNeedsAuth: options.onNeedsAuth } : {}),
                 },
                 options.serverName,
-                async (conn) => {
-                  await options.manager.ensureListen?.(options.serverName, conn);
-                  return conn.client.callTool(callArgs, options.manager.getRequestOptions?.(options.serverName));
-                },
+                callTool,
               )
-            : await (async () => {
-                await options.manager.ensureListen?.(options.serverName, connection);
-                return connection.client.callTool(callArgs, options.manager.getRequestOptions?.(options.serverName));
-              })();
+            : await callTool(connection);
           sendJson(res, 200, { ok: true, result });
         } finally {
           options.manager.decrementInFlight(options.serverName);
@@ -718,7 +727,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
             return;
           }
 
-          if (method === "HEAD" && url.pathname === SANDBOX_PROXY_PATH) {
+          if ((method === "GET" || method === "HEAD") && url.pathname === SANDBOX_PROXY_PATH) {
             res.writeHead(200, {
               "Content-Type": "text/html; charset=utf-8",
               "Cache-Control": "no-store",
@@ -726,19 +735,11 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
               "Referrer-Policy": "no-referrer",
               "X-Content-Type-Options": "nosniff",
             });
-            res.end();
-            return;
-          }
-
-          if (method === "GET" && url.pathname === SANDBOX_PROXY_PATH) {
-            res.writeHead(200, {
-              "Content-Type": "text/html; charset=utf-8",
-              "Cache-Control": "no-store",
-              "Content-Security-Policy": buildSandboxProxyCsp(),
-              "Referrer-Policy": "no-referrer",
-              "X-Content-Type-Options": "nosniff",
-            });
-            res.end(buildSandboxProxyHtml({ parentOrigin, resourcePath: sandboxResourcePath }));
+            res.end(method === "HEAD" ? undefined : buildSandboxProxyHtml({
+              parentOrigin,
+              resourcePath: sandboxResourcePath,
+              allowAttribute: resourceAllow,
+            }));
             return;
           }
 

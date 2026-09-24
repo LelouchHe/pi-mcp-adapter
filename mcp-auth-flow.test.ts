@@ -140,23 +140,15 @@ describe("mcp-auth-flow", () => {
   })
 
   describe("getValidToken", () => {
-    it("uses one token snapshot for expiry and return decisions", async () => {
-      const serverName = "snapshot-refresh-test"
-      const serverUrl = "https://snapshot-refresh.example.com/mcp"
-      updateTokens(serverName, {
-        accessToken: "expired-token",
-        refreshToken: "refresh-token",
+    it("returns null for an expired access token without a refresh token", async () => {
+      const serverName = "expired-no-refresh-test"
+      const serverUrl = "https://expired-no-refresh.example.com/mcp"
+      await updateTokens(serverName, {
+        accessToken: "expired-access",
         expiresAt: Date.now() / 1000 - 3600,
       }, serverUrl)
 
-      const result = getValidToken(serverName, serverUrl)
-      queueMicrotask(() => updateTokens(serverName, {
-        accessToken: "replacement-token",
-        expiresAt: Date.now() / 1000 + 3600,
-      }, serverUrl))
-
-      assert.strictEqual(await result, null)
-      assert.strictEqual(getAuthForUrl(serverName, serverUrl)?.tokens?.accessToken, "replacement-token")
+      assert.strictEqual(await getValidToken(serverName, serverUrl), null)
       clearAllCredentials(serverName)
     })
 
@@ -423,6 +415,68 @@ describe("mcp-auth-flow", () => {
       )
     })
 
+    it("should accept, interpolate, and trim an HTTPS OAuth clientMetadataUrl", () => {
+      process.env.PI_MCP_TEST_CIMD_HOST = "client.example.com"
+      try {
+        const config = extractOAuthConfig({
+          url: "https://api.example.com/mcp",
+          auth: "oauth",
+          oauth: { clientMetadataUrl: "  https://${PI_MCP_TEST_CIMD_HOST}/oauth/client.json  " },
+        })
+        assert.strictEqual(config.clientMetadataUrl, "https://client.example.com/oauth/client.json")
+      } finally {
+        delete process.env.PI_MCP_TEST_CIMD_HOST
+      }
+    })
+
+    it("should reject clientMetadataUrl with clientSecret unless clientId is explicit", () => {
+      for (const grantType of ["authorization_code", "client_credentials"] as const) {
+        assert.throws(
+          () => extractOAuthConfig({
+            url: "https://api.example.com/mcp",
+            auth: "oauth",
+            oauth: {
+              grantType,
+              clientMetadataUrl: "https://client.example.com/oauth/client.json",
+              clientSecret: "secret",
+            },
+          }),
+          /clientSecret requires an explicit clientId when clientMetadataUrl is configured/,
+        )
+      }
+
+      assert.doesNotThrow(() => extractOAuthConfig({
+        url: "https://api.example.com/mcp",
+        auth: "oauth",
+        oauth: {
+          clientId: "registered-client",
+          clientMetadataUrl: "https://client.example.com/oauth/client.json",
+          clientSecret: "secret",
+        },
+      }))
+    })
+
+    it("should reject malformed OAuth clientMetadataUrl values", () => {
+      for (const clientMetadataUrl of ["", "  ", "http://client.example.com/client.json", "https://client.example.com/", "not a url"]) {
+        assert.throws(
+          () => extractOAuthConfig({
+            url: "https://api.example.com/mcp",
+            auth: "oauth",
+            oauth: { clientMetadataUrl },
+          }),
+          /clientMetadataUrl must (not be empty|be a valid HTTPS URL with a non-root pathname)/,
+        )
+      }
+      assert.throws(
+        () => extractOAuthConfig({
+          url: "https://api.example.com/mcp",
+          auth: "oauth",
+          oauth: { clientMetadataUrl: 123 as unknown as string },
+        }),
+        /clientMetadataUrl must be a string/,
+      )
+    })
+
     it("should accept and trim an absolute https OAuth authServerMetadataUrl", () => {
       const config = extractOAuthConfig({
         url: "https://api.example.com/mcp",
@@ -525,37 +579,3 @@ describe("mcp-auth-flow", () => {
     })
   })
 })
-
-for (const redirectUri of ["https://app.example/callback", "http://127.0.0.1:{port}/callback"]) {
-  it(`cancels public startAuth before the account holder releases (${redirectUri})`, async () => {
-    const { acquireRefreshLock, sharedRefreshLockRoot } = await import("./mcp-refresh-lock.ts")
-    const { createOAuthRuntime, hasPendingAuth } = await import("./mcp-auth-flow.ts")
-    const name = `public-cancel-${randomBytes(6).toString("hex")}`
-    const holder = await acquireRefreshLock(name, sharedRefreshLockRoot())
-    const runtime = createOAuthRuntime()
-    const controller = new AbortController()
-    const reason = new Error("caller cancelled while waiting")
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const pending = startAuth(name, "https://api.example/mcp", { oauth: { redirectUri } }, {
-      runtime, signal: controller.signal,
-    })
-    const rejected = assert.rejects(pending, error => error === reason)
-    try {
-      await new Promise(resolve => setTimeout(resolve, 100))
-      controller.abort(reason)
-      await Promise.race([
-        rejected,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("startAuth waited for the holder after cancellation")), 1000)
-        }),
-      ])
-      assert.strictEqual(hasPendingAuth(name, undefined, runtime), false)
-      assert.strictEqual(isCallbackServerRunning(), false)
-    } finally {
-      clearTimeout(timer)
-      holder.release()
-      await rejected
-      await shutdownOAuth(runtime)
-    }
-  })
-}

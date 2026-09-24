@@ -231,8 +231,10 @@ export interface OAuthConfig {
     grantType?: "authorization_code" | "client_credentials";
     /** Pre-registered client ID (optional, dynamic registration used if not provided) */
     clientId?: string;
-    /** Client secret for confidential clients */
+    /** Client secret for confidential clients; requires an explicit clientId when clientMetadataUrl is set. */
     clientSecret?: string;
+    /** Operator-supplied public HTTPS Client ID Metadata Document URL (SEP-991); opt-in, with DCR remaining the default. */
+    clientMetadataUrl?: string;
     /** Requested OAuth scopes */
     scope?: string;
     /** Extra authorization URL parameters for provider-specific extensions. Flow-owned parameters cannot be overridden. */
@@ -328,6 +330,15 @@ export interface ServerEntry {
      * with no fallback. `auto` and `2026-07-28` must be set explicitly.
      */
     protocolVersion?: "legacy" | "auto" | "2026-07-28";
+    /**
+     * MCP Tasks extension (io.modelcontextprotocol/tasks, SEP-2663) support.
+     * On 2026-07-28 connections where the server advertises the extension, tool
+     * calls that return a task handle are transparently polled to completion,
+     * task-time elicitation is routed through the normal elicitation UI, and
+     * aborting a call cancels the remote task. Enabled by default; set to
+     * false to keep the plain synchronous call path.
+     */
+    tasks?: boolean;
     disabled?: boolean;
 }
 /** Only the literal boolean `true` disables a server. */
@@ -368,8 +379,11 @@ export interface McpToolApprovalRequest {
     signal?: AbortSignal;
     claim(handler: McpToolApprovalHandler): boolean;
 }
+export type { JevAnswer, JevErrorCode, JevEvaluateInput, JevEvaluationData, JevEvaluationEnvelope, JevJson, JevQuestion } from "./jev-contracts.ts";
 export interface McpSettings {
     toolPrefix?: ToolPrefix;
+    /** Allow agents to persist remote MCP endpoints with the install action. Defaults to true. */
+    allowInstall?: boolean;
     /** Show the plug prefix in MCP status and connection text (default: true). Set to false to disable it. */
     showStatusIcon?: boolean;
     /** Footer status verbosity: full details, compact connected/enabled count, or no footer status. Defaults to full. */
@@ -384,7 +398,11 @@ export interface McpSettings {
     agentPluginPaths?: string[];
     idleTimeout?: number;
     requestTimeoutMs?: number;
+    /** Defer lazy runtime startup even when persisted metadata is missing or invalid. Defaults to false. */
+    deferWithMissingMetadata?: boolean;
     directTools?: boolean | "search";
+    /** Register per-server mcp__<server> namespace proxies. Defaults to true. */
+    namespaceProxyTools?: boolean;
     /**
      * Validate direct-tool inputs against the advertised schema after recovering
      * one JSON string layer for object and array properties. Defaults to false.
@@ -399,6 +417,27 @@ export interface McpSettings {
     warnOnLargeDirectTools?: boolean;
     /** Register the trusted MCP-only JavaScript scripting tool. Defaults to true; set false to hide it. */
     scriptMode?: boolean;
+    /** Expose MCP resources as tools (default: true). Set to false to disable globally across all servers. */
+    exposeResources?: boolean;
+    /** Optional Jev (System One) integrations. A valid key enables semantic search; script evaluation remains disabled by default. */
+    jev?: false | {
+        semanticSearch?: boolean;
+        scriptEvaluation?: boolean;
+        /** Restrict semantic-search metadata and allow script-evaluation sources. Semantic search defaults to every enabled server. */
+        allowedServers?: string[];
+        model?: string;
+        requestTimeoutMs?: number;
+        maxRetries?: number;
+        maxStateBytes?: number;
+        maxQuestionsPerRequest?: number;
+        maxEvaluationsPerScript?: number;
+        maxEvaluationBytesPerScript?: number;
+        /** Cumulative provider-reported input plus output tokens per script. Defaults to 32768. */
+        maxEvaluationTokensPerScript?: number;
+        /** Maximum semantic candidates per request. Defaults to 127; range 2..127. */
+        semanticCandidateLimit?: number;
+        semanticMinProbability?: number;
+    };
     /** Render MCP tool results as compact self-rendered rows by default, or as the legacy boxed row. */
     toolResultRendering?: "compact" | "boxed";
     /** Number of result text lines to show before expansion. Supports 1, 2, or 3. Defaults to 1 in compact mode and 3 in boxed mode. */
@@ -432,6 +471,8 @@ export interface McpSettings {
      * instruction when unset.
      */
     authRequiredMessage?: string;
+    /** Explicitly use AES-256-GCM files keyed by PI_MCP_ADAPTER_OAUTH_FILE_KEY instead of the OS credential store. */
+    oauthCredentialStore?: "encrypted-file";
     /**
      * Legacy OAuth tokens.json import directory.
      * Relative paths are resolved from the project root (cwd).
@@ -562,6 +603,11 @@ export declare function getServerPrefix(serverName: string, mode: ToolPrefix): s
  */
 export declare function formatToolName(toolName: string, serverName: string, prefix: ToolPrefix): string;
 export declare function resolveToolPrefix(definition?: Pick<ServerEntry, "toolPrefix">, globalPrefix?: ToolPrefix): ToolPrefix;
+/** A canonical name has an owner only when exactly one eligible entry produces it. */
+export declare function resolveUniqueNameOwnership<T>(entries: readonly T[], getName: (entry: T) => string): {
+    unique: T[];
+    collisions: Map<string, T[]>;
+};
 /**
  * Resolve a configured MCP server name from a prefixed tool name.
  *

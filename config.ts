@@ -1,12 +1,15 @@
 // config.ts - Config loading with import support
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import stripJsonComments from "strip-json-comments";
 import { getAgentPath, getConfigDirName } from "./agent-dir.ts";
 import { getAgentPluginSummaries, loadAgentPluginConfigs, type AgentPluginSummary } from "./agent-plugin-loader.ts";
+import { cloneBuiltInAgentPluginEntry, isBuiltInAgentPlugin, mergeBuiltInAgentPluginEntries } from "./agent-plugin-provenance.ts";
 import { loadClaudePluginBundles } from "./claude-plugin-loader.ts";
 import { loadPackageMcpConfigs } from "./package-mcp-loader.ts";
+import { validateJevSettings } from "./jev-client.ts";
 import { formatServerNamespace, isServerDisabled, type ClaudePluginConfig, type HostConfigDiscovery, type McpConfig, type ServerEntry, type McpSettings, type ImportKind, type ServerProvenance } from "./types.ts";
 import { parseJsonWithComments, toStringRecord } from "./utils.ts";
 
@@ -312,7 +315,12 @@ export function getMcpDiscoverySummary(
 }
 
 export function cloneMcpConfig(config: McpConfig): McpConfig {
-  return structuredClone(config);
+  const cloned = structuredClone(config);
+  for (const [name, source] of Object.entries(config.mcpServers)) {
+    const builtInClone = cloneBuiltInAgentPluginEntry(source);
+    if (builtInClone) cloned.mcpServers[name] = builtInClone;
+  }
+  return cloned;
 }
 
 export function loadMcpConfig(overridePath?: string, cwd = process.cwd()): McpConfig {
@@ -368,7 +376,15 @@ function mergeClaudePluginMcpDefaults(
     console.warn(`Claude plugin MCP server "${name}" is shadowed by higher-precedence server "${higherName}" because both normalize to the same namespace`);
     return false;
   }));
-  return mergeConfigs({ mcpServers: defaults }, higherPrecedenceConfig);
+  return applySettingDefaults(mergeConfigs({ mcpServers: defaults }, higherPrecedenceConfig));
+}
+
+function applySettingDefaults(config: McpConfig): McpConfig {
+  const exposeResources = config.settings?.exposeResources;
+  if (exposeResources === undefined) return config;
+  const mcpServers = Object.fromEntries(Object.entries(config.mcpServers)
+    .map(([name, entry]) => [name, entry.exposeResources === undefined ? { ...entry, exposeResources } : entry]));
+  return { ...config, mcpServers };
 }
 
 function getMergedSettings(overridePath?: string, cwd = process.cwd()): McpSettings | undefined {
@@ -703,7 +719,11 @@ function mergeServerMaps(
         delete baseEntry.oauth;
       }
     }
-    merged[name] = { ...baseEntry, ...definition };
+    if (existing && Object.hasOwn(definition, "env") && isBuiltInAgentPlugin(existing, "env") && !Object.hasOwn(definition, "literalEnv")) {
+      if (baseEntry === existing) baseEntry = { ...existing };
+      delete baseEntry.literalEnv;
+    }
+    merged[name] = mergeBuiltInAgentPluginEntries(baseEntry, definition);
   }
   return merged;
 }
@@ -786,7 +806,27 @@ function loadImportedConfig(
       try {
         const value = readImportedConfig(path);
         if (value && typeof value === "object" && !Array.isArray(value)) {
-          merged = mergeOpenCodeConfigs(merged, value as Record<string, unknown>);
+          const imported = value as Record<string, unknown>;
+          const mcp = isRecord(imported.mcp) ? imported.mcp : {};
+          // OpenCode v2 nests definitions under mcp.servers; normalize before
+          // merging so project overrides retain the existing merge semantics.
+          const entries = isRecord(mcp.servers)
+            ? { ...Object.fromEntries(Object.entries(mcp).filter(([name]) => name !== "servers" && name !== "timeout")), ...mcp.servers }
+            : mcp;
+          const normalized = Object.fromEntries(Object.entries(entries).map(([name, entry]) => {
+            if (!isRecord(entry) || !isRecord(entry.oauth)) return [name, entry];
+            const { client_id, client_secret, auth_server_metadata_url, ...oauth } = entry.oauth;
+            return [name, {
+              ...entry,
+              oauth: {
+                ...oauth,
+                ...(client_id !== undefined ? { clientId: client_id } : {}),
+                ...(client_secret !== undefined ? { clientSecret: client_secret } : {}),
+                ...(auth_server_metadata_url !== undefined ? { authServerMetadataUrl: auth_server_metadata_url } : {}),
+              },
+            }];
+          }));
+          merged = mergeOpenCodeConfigs(merged, { ...imported, mcp: normalized });
           highestPrecedencePath = path;
         }
       } catch (error) {
@@ -818,7 +858,9 @@ function readValidatedConfig(path: string, label: string): McpConfig | null {
   if (!existsSync(path)) return null;
 
   try {
-    return validateConfig(parseJsonWithComments(readFileSync(path, "utf-8")));
+    const text = readFileSync(path, "utf-8");
+    if (stripJsonComments(text, { trailingCommas: true }).trim() === "") return null;
+    return validateConfig(parseJsonWithComments(text));
   } catch (error) {
     console.warn(`Failed to load ${label}:`, error);
     return null;
@@ -833,9 +875,19 @@ function validateConfig(raw: unknown): McpConfig {
   return {
     mcpServers: toServerEntries(raw.mcpServers ?? raw["mcp-servers"]),
     ...(Array.isArray(raw.imports) ? { imports: raw.imports as ImportKind[] } : {}),
-    ...(raw.settings !== undefined ? { settings: raw.settings as McpSettings } : {}),
+    ...(raw.settings !== undefined ? { settings: parseSettings(raw.settings) } : {}),
     ...(raw.claudePlugins !== undefined ? { claudePlugins: parseClaudePlugins(raw.claudePlugins) } : {}),
   };
+}
+
+function parseSettings(value: unknown): McpSettings {
+  if (!isRecord(value)) throw new Error("settings must be an object");
+  const settings = { ...value } as McpSettings;
+  if (value.jev !== undefined) {
+    validateJevSettings(value.jev);
+    settings.jev = value.jev as NonNullable<McpSettings["jev"]>;
+  }
+  return settings;
 }
 
 function parseClaudePlugins(value: unknown): ClaudePluginConfig[] {
@@ -974,7 +1026,7 @@ function extractServers(config: unknown, kind: ImportKind): Record<string, Serve
     if (kind === "opencode") {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
       const raw = entry as Record<string, unknown>;
-      if (raw.enabled === false) continue;
+      if (raw.enabled === false || raw.disabled === true) continue;
 
       if (raw.type === "local" && Array.isArray(raw.command) && raw.command.length > 0 && raw.command.every((value): value is string => typeof value === "string")) {
         const env = toStringRecord(raw.environment);
@@ -1001,11 +1053,15 @@ function extractServers(config: unknown, kind: ImportKind): Record<string, Serve
         } else if (raw.oauth && typeof raw.oauth === "object" && !Array.isArray(raw.oauth)) {
           const oauth = raw.oauth as Record<string, unknown>;
           mapped.auth = "oauth";
+          const clientId = oauth.clientId;
+          const clientSecret = oauth.clientSecret;
+          const authServerMetadataUrl = oauth.authServerMetadataUrl;
           mapped.oauth = {
-            ...(typeof oauth.clientId === "string" ? { clientId: oauth.clientId } : {}),
-            ...(typeof oauth.clientSecret === "string" ? { clientSecret: oauth.clientSecret } : {}),
+            ...(typeof clientId === "string" ? { clientId } : {}),
+            ...(typeof clientSecret === "string" ? { clientSecret } : {}),
+            ...(typeof oauth.clientMetadataUrl === "string" ? { clientMetadataUrl: oauth.clientMetadataUrl } : {}),
             ...(typeof oauth.scope === "string" ? { scope: oauth.scope } : {}),
-            ...(typeof oauth.authServerMetadataUrl === "string" ? { authServerMetadataUrl: oauth.authServerMetadataUrl } : {}),
+            ...(typeof authServerMetadataUrl === "string" ? { authServerMetadataUrl } : {}),
             ...(typeof oauth.skipIssuerMetadataValidation === "boolean"
               ? { skipIssuerMetadataValidation: oauth.skipIssuerMetadataValidation }
               : {}),
@@ -1125,11 +1181,67 @@ function readRawConfigObject(filePath: string): Record<string, unknown> {
   }
 }
 
+function writeConfigText(writePath: string, text: string): void {
+  let mode: number | undefined;
+  try {
+    writePath = realpathSync(writePath);
+    mode = statSync(writePath).mode & 0o777;
+  } catch {}
+  mkdirSync(dirname(writePath), { recursive: true });
+  const tmpPath = `${writePath}.${process.pid}.tmp`;
+  rmSync(tmpPath, { force: true });
+  try {
+    writeFileSync(tmpPath, text, mode === undefined ? "utf-8" : { encoding: "utf-8", mode });
+    if (mode !== undefined) chmodSync(tmpPath, mode);
+    renameSync(tmpPath, writePath);
+  } catch (error) {
+    try { rmSync(tmpPath, { force: true }); } catch {}
+    throw error;
+  }
+}
+
 function writeRawConfigObject(filePath: string, raw: Record<string, unknown>): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, `${JSON.stringify(raw, null, 2)}\n`, "utf-8");
-  renameSync(tmpPath, filePath);
+  writeConfigText(filePath, `${JSON.stringify(raw, null, 2)}\n`);
+}
+
+export function writeSharedConfigText(filePath: string, text: string): void {
+  if (!isRecord(parseJsonWithComments(text))) throw new Error("top-level value must be an object");
+  writeConfigText(filePath, text);
+}
+
+export function writeJevSemanticSearchConfig(
+  overridePath: string | undefined,
+  cwd: string,
+  allowedServers: string[],
+  effectiveJev?: unknown,
+): { path: string; changed: boolean } {
+  const filePath = overridePath ? getPiGlobalConfigPath(overridePath) : getProjectPiConfigPath(cwd);
+  let raw: Record<string, unknown> = {};
+  if (existsSync(filePath)) {
+    try {
+      const parsed = parseJsonWithComments(readFileSync(filePath, "utf8"));
+      if (!isRecord(parsed)) throw new Error("top-level value must be an object");
+      raw = parsed;
+    } catch (error) {
+      throw new Error(`Failed to update Jev settings at ${filePath}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
+  }
+  if (raw.settings !== undefined && !isRecord(raw.settings)) {
+    throw new Error(`Failed to update Jev settings at ${filePath}: settings must be an object`);
+  }
+  const settings = raw.settings as Record<string, unknown> | undefined;
+  const currentJev = settings?.jev;
+  if (currentJev !== undefined && currentJev !== false && !isRecord(currentJev)) {
+    throw new Error(`Failed to update Jev settings at ${filePath}: settings.jev must be an object or false`);
+  }
+  const jev = isRecord(effectiveJev) ? effectiveJev : isRecord(currentJev) ? currentJev : {};
+  const nextServers = [...new Set(allowedServers)].sort((a, b) => a.localeCompare(b));
+  const nextJev = { ...jev, semanticSearch: true, allowedServers: nextServers };
+  validateJevSettings(nextJev);
+  if (isRecord(currentJev) && JSON.stringify(currentJev) === JSON.stringify(nextJev)) return { path: filePath, changed: false };
+  raw.settings = { ...settings, jev: nextJev };
+  writeRawConfigObject(filePath, raw);
+  return { path: filePath, changed: true };
 }
 
 function getServersObject(raw: Record<string, unknown>): Record<string, ServerEntry> {

@@ -71,11 +71,16 @@ vi.mock("../metadata-cache.ts", () => ({
   loadMetadataCache: mocks.loadMetadataCache,
 }));
 
-vi.mock("../direct-tools.ts", () => ({
+vi.mock("../direct-tool-surface.ts", () => ({
   buildProxyDescription: mocks.buildProxyDescription,
-  createDirectToolExecutor: mocks.createDirectToolExecutor,
+  getLargeDirectToolsAdvisory: vi.fn(() => undefined),
   getMissingConfiguredDirectToolServers: mocks.getMissingConfiguredDirectToolServers,
+  prepareDirectToolArguments: vi.fn((_schema: unknown, args: unknown) => args),
   resolveDirectTools: mocks.resolveDirectTools,
+}));
+
+vi.mock("../direct-tools.ts", () => ({
+  createDirectToolExecutor: mocks.createDirectToolExecutor,
 }));
 
 vi.mock("../commands.ts", () => ({
@@ -414,6 +419,7 @@ describe("runtime MCP server registration", () => {
       name: "plugin-direct",
       definition: { url: "https://direct.test/mcp", directTools: true },
     });
+    await settle();
 
     expect(state.config.mcpServers["plugin-direct"]).toMatchObject({
       url: "https://direct.test/mcp",
@@ -454,6 +460,7 @@ describe("runtime MCP server registration", () => {
       name: "plugin-search",
       definition: { url: "https://search.test/mcp", directTools: "search" },
     });
+    await settle();
 
     // Search-mode tools are only reachable through mcp({ search }), which reads
     // live metadata, so the mode survives the runtime direct-tools default and

@@ -24,7 +24,7 @@ import { McpServerManager, isTransientHttpConnectError } from "./server-manager.
 import { buildToolMetadata, totalToolCount } from "./tool-metadata.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import { UiResourceHandler } from "./ui-resource-handler.ts";
-import { formatMcpStatus, openUrl, parallelLimit, sanitizeTerminalText } from "./utils.ts";
+import { formatMcpFooterStatus, formatMcpStatus, openUrl, parallelLimit, sanitizeTerminalText } from "./utils.ts";
 import { logger } from "./logger.ts";
 import { throwIfAborted } from "./abort.ts";
 import { getAuthStorageOptions } from "./mcp-auth.ts";
@@ -141,7 +141,7 @@ export async function initializeMcp(
   const config = options.config !== undefined
     ? resolveConfiguredClaudePluginMcp(cloneMcpConfig(options.config), cwd)
     : loadMcpConfig(configPath, cwd);
-  const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd);
+  const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd, config.settings?.oauthCredentialStore);
 
   const ownsOAuthRuntime = options.oauthRuntime === undefined;
   const oauthRuntime = options.oauthRuntime ?? createOAuthRuntime(owner.signal);
@@ -209,6 +209,7 @@ export async function initializeMcp(
     failureTracker,
     failureMessages,
     approvedToolCalls,
+    approvedServers: new Map(),
     ...(persistSessionApproval !== undefined ? { persistSessionApproval } : {}),
     ...(sessionManager !== undefined ? { sessionManager } : {}),
     approvalEvents: pi.events,
@@ -245,13 +246,16 @@ export async function initializeMcp(
   manager.setMetadataListChangedListener?.((serverName, reason) => {
     if (!owner.isActive()) return;
     updateServerMetadata(state, serverName);
-    updateMetadataCache(state, serverName, { preserveEmptyResources: false });
+    updateMetadataCache(state, serverName);
     notifyToolMetadataUpdated(state, serverName, reason);
     updateStatusBar(state);
   });
   manager.setListenStateChangedListener?.(() => {
     if (!owner.isActive()) return;
     updateStatusBar(state);
+  });
+  owner.addCleanup(() => {
+    state.approvedServers = new Map();
   });
   owner.addCleanup(() => lifecycle.gracefulShutdown());
   owner.addCleanup(() => {
@@ -534,7 +538,12 @@ export function markKeepAliveAfterConnect(state: McpExtensionState, serverName: 
 
 export function updateServerMetadata(state: McpExtensionState, serverName: string): void {
   const connection = state.manager.getConnection(serverName);
-  if (!connection || connection.status !== "connected") return;
+  if (!connection || connection.status !== "connected") {
+    state.toolMetadata.delete(serverName);
+    state.resourceCounts?.delete(serverName);
+    state.directToolCounts?.delete(serverName);
+    return;
+  }
 
   const definition = state.config.mcpServers[serverName];
   if (!definition) return;
@@ -566,7 +575,6 @@ export function updateServerMetadata(state: McpExtensionState, serverName: strin
 export function updateMetadataCache(
   state: McpExtensionState,
   serverName: string,
-  options: { preserveEmptyResources?: boolean } = {},
 ): void {
   if (state.provisionalInstalls?.has(serverName)) return;
   const connection = state.manager.getConnection(serverName);
@@ -587,10 +595,9 @@ export function updateMetadataCache(
 
   if (
     definition.exposeResources !== false &&
-    resources.length === 0 &&
+    connection.resourceDiscoveryFailed === true &&
     existingEntry?.resources?.length &&
-    existingEntry.configHash === configHash &&
-    options.preserveEmptyResources !== false
+    isServerCacheValid(existingEntry, definition)
   ) {
     resources = existingEntry.resources;
   }
@@ -639,28 +646,11 @@ export function updateStatusBar(state: McpExtensionState): void {
   const entries = Object.entries(state.config.mcpServers);
   const disabledCount = entries.filter(([, definition]) => isServerDisabled(definition)).length;
   const enabledCount = entries.length - disabledCount;
-  if (entries.length === 0) {
-    ui.setStatus("mcp", undefined);
-    return;
-  }
   const connectedCount = [...state.manager.getAllConnections()].filter(([name, connection]) => {
     const definition = state.config.mcpServers[name];
     return connection.status === "connected" && definition !== undefined && !isServerDisabled(definition);
   }).length;
-  const footerStatus = state.config.settings?.mcpFooterStatus ?? "full";
-  if (footerStatus === "off") {
-    ui.setStatus("mcp", undefined);
-    return;
-  }
-
-  let status = footerStatus === "compact"
-    ? `MCP ${connectedCount}/${enabledCount}`
-    : `${enabledCount} ${enabledCount === 1 ? "server" : "servers"} enabled`;
-  if (footerStatus === "full") {
-    if (connectedCount > 0) status += ` (${connectedCount} connected)`;
-    if (disabledCount > 0) status += ` (${disabledCount} disabled)`;
-  }
-  const formattedStatus = footerStatus === "compact" ? status : formatMcpStatus(state.config, status);
+  const formattedStatus = formatMcpFooterStatus(state.config, enabledCount, disabledCount, connectedCount);
   if (formattedStatus === undefined) {
     ui.setStatus("mcp", undefined);
     return;
