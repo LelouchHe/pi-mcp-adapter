@@ -267,6 +267,17 @@ export async function initializeMcp(
 
   const allServerEntries = Object.entries(config.mcpServers);
   const serverEntries = allServerEntries.filter(([, definition]) => !isServerDisabled(definition));
+
+  // The lifecycle loop also serves runtime-registered servers, so it starts
+  // whenever the adapter does. Returning early for a config that declares no
+  // servers would otherwise leave a runtime-only install — one whose every MCP
+  // server arrives through runtime registration — with no idle cleanup and no
+  // keep-alive recovery at all.
+  const idleSetting = typeof config.settings?.idleTimeout === "number" ? config.settings.idleTimeout : 10;
+  lifecycle.setGlobalIdleTimeout(idleSetting);
+  owner.throwIfInactive();
+  lifecycle.startHealthChecks(runtimeSignal);
+
   if (serverEntries.length === 0) {
     if (allServerEntries.length > 0 && hasUI) {
       ui?.notify(`MCP: All ${allServerEntries.length} server(s) are disabled`, "info");
@@ -274,9 +285,6 @@ export async function initializeMcp(
     publishMcpStatusSnapshot(state);
     return state;
   }
-
-  const idleSetting = typeof config.settings?.idleTimeout === "number" ? config.settings.idleTimeout : 10;
-  lifecycle.setGlobalIdleTimeout(idleSetting);
 
   const cachePath = getMetadataCachePath();
   const cacheFileExists = existsSync(cachePath);
@@ -519,7 +527,6 @@ export async function initializeMcp(
   });
 
   owner.throwIfInactive();
-  lifecycle.startHealthChecks(runtimeSignal);
   if (config.settings?.mcpFooterStatus === "off") {
     ui?.setStatus("mcp", undefined);
   }

@@ -211,10 +211,20 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     return true;
   }
 
+  // Any opt-in needs a live catalog: `"search"` tools are only reachable through
+  // mcp({ search }), which reads live metadata, and native tools are built from it.
   function hasDirectToolOptIn(definition: ServerEntry): boolean {
     return definition.directTools === true ||
       definition.directTools === "search" ||
       (Array.isArray(definition.directTools) && definition.directTools.length > 0);
+  }
+
+  // Narrower than the auto-connect opt-in above: a server whose tools are
+  // promoted into Pi's native surface is expected to stay ready, while
+  // `"search"` deliberately keeps its tools out of that surface. Keep the two
+  // separate so a search-mode server stays lazy.
+  function promotesNativeDirectTools(directTools: ServerEntry["directTools"]): boolean {
+    return directTools === true || (Array.isArray(directTools) && directTools.length > 0);
   }
 
   interface RuntimeGuard {
@@ -772,9 +782,19 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     // through mcp({ search }), which reads live metadata.
     const snapshotDefinition = structuredClone(definition);
     const directTools: ServerEntry["directTools"] = snapshotDefinition.directTools ?? false;
+    // A server promoted into Pi's native surface is expected to stay ready: that
+    // surface is refreshed from a live session, and an idle close would make the
+    // next native tool call pay a reconnect. Default such a server to
+    // `lazy-keep-alive` — never idle-closed, and health-checked after its first
+    // connect — unless the caller states a lifecycle explicitly. Materializing
+    // the choice here keeps every reader (lifecycle registration, keep-alive
+    // marking after connect, status output) on one value.
+    const lifecycle: ServerEntry["lifecycle"] =
+      snapshotDefinition.lifecycle ?? (promotesNativeDirectTools(directTools) ? "lazy-keep-alive" : undefined);
     const entry: ServerEntry = {
       ...structuredClone(snapshotDefinition),
       directTools,
+      ...(lifecycle !== undefined ? { lifecycle } : {}),
     };
     runtimeServers.set(name, { definition: snapshotDefinition, entry });
     const registeredState = state;

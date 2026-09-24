@@ -424,7 +424,15 @@ describe("runtime MCP server registration", () => {
     expect(state.config.mcpServers["plugin-direct"]).toMatchObject({
       url: "https://direct.test/mcp",
       directTools: true,
+      // Native tools are refreshed from the live catalog, so the fork keeps such
+      // a server ready instead of letting it idle out.
+      lifecycle: "lazy-keep-alive",
     });
+    expect(state.lifecycle.registerServer).toHaveBeenCalledWith(
+      "plugin-direct",
+      expect.objectContaining({ url: "https://direct.test/mcp" }),
+      { idleTimeout: 0 },
+    );
     expect(mocks.lazyConnect).toHaveBeenCalledWith(state, "plugin-direct");
     expect(api.registerTool).toHaveBeenCalledWith(
       expect.objectContaining({ name: "plugin-direct_echo" }),
@@ -469,9 +477,45 @@ describe("runtime MCP server registration", () => {
       url: "https://search.test/mcp",
       directTools: "search",
     });
+    expect(state.config.mcpServers["plugin-search"]).not.toHaveProperty("lifecycle");
+    expect(state.lifecycle.registerServer).toHaveBeenCalledWith(
+      "plugin-search",
+      expect.objectContaining({ url: "https://search.test/mcp" }),
+      undefined,
+    );
     expect(mocks.lazyConnect).toHaveBeenCalledWith(state, "plugin-search");
     expect(api.registerTool).toHaveBeenCalledWith(
       expect.objectContaining({ name: "plugin-search_find" }),
+    );
+
+    await registration.dispose();
+  });
+
+  it("keeps an explicit lifecycle on a runtime direct-tool registration", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    const { default: mcpAdapter, registerMcpServer } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await settle();
+
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-explicit",
+      definition: { url: "https://explicit.test/mcp", directTools: true, lifecycle: "lazy" },
+    });
+    await settle();
+
+    expect(state.config.mcpServers["plugin-explicit"]).toMatchObject({
+      url: "https://explicit.test/mcp",
+      directTools: true,
+      lifecycle: "lazy",
+    });
+    expect(state.lifecycle.registerServer).toHaveBeenCalledWith(
+      "plugin-explicit",
+      expect.objectContaining({ url: "https://explicit.test/mcp" }),
+      undefined,
     );
 
     await registration.dispose();

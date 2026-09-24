@@ -124,6 +124,28 @@ describe("lazy-keep-alive initializeMcp integration", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  // A runtime-only install declares no MCP servers and receives every server
+  // through runtime registration, so the lifecycle loop has to start anyway;
+  // otherwise runtime servers get no idle cleanup and no keep-alive recovery.
+  // The loop owns the only caller, so it must also not start twice.
+  it.each([
+    ["no configured servers", {}],
+    ["one configured server", { srv: { command: "demo" } }],
+  ])("starts the lifecycle loop exactly once with %s", async (_label, mcpServers) => {
+    mocks.config = { settings: {}, mcpServers };
+    const { McpLifecycleManager } = await import("../lifecycle.ts");
+    const startSpy = vi.spyOn(McpLifecycleManager.prototype, "startHealthChecks");
+    const { initializeMcp } = await import("../init.ts");
+
+    await initializeMcp({ getFlag: vi.fn(() => undefined) } as any, {
+      cwd: tempDir,
+      hasUI: false,
+      mode: "headless",
+    } as any);
+
+    expect(startSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("provides all successful startup metadata for collision filtering", async () => {
     mocks.cache = null;
     mocks.config = {
