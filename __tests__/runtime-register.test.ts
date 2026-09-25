@@ -693,6 +693,39 @@ describe("runtime MCP server registration", () => {
     await replacement.dispose();
   });
 
+  it("disposes a runtime registration after the MCP panel clones its definition", async () => {
+    const { state, api, registerMcpServer } = await startInitializedSession();
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-panel": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-panel_echo", originalName: "echo", description: "Cached", inputSchema: { type: "object" } },
+    ]);
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-panel",
+      definition: { url: "https://panel.test/mcp", directTools: true },
+    });
+    await settle();
+    expect(state.toolMetadata.has("plugin-panel")).toBe(true);
+
+    mocks.openMcpPanel.mockImplementation(async (_state, _pi, _ctx, _path, applyChanges) => {
+      applyChanges(new Map([["plugin-panel", ["echo"]]]));
+      return { configChanged: false };
+    });
+    const mcpCommand = api.registerCommand.mock.calls.find(([name]: [string]) => name === "mcp")?.[1];
+    expect(mcpCommand).toBeDefined();
+    await mcpCommand.handler("", {
+      hasUI: true,
+      cwd: "/tmp/project",
+      ui: { notify: vi.fn(), setStatus: vi.fn(), theme: { fg: (_name: string, text: string) => text } },
+      reload: vi.fn(),
+    });
+
+    expect(state.config.mcpServers["plugin-panel"]).toMatchObject({ directTools: ["echo"] });
+    await registration.dispose();
+    expect(state.config.mcpServers["plugin-panel"]).toBeUndefined();
+    expect(state.toolMetadata.has("plugin-panel")).toBe(false);
+  });
+
   it("does not delete new-session live metadata using an old runtime cache marker", async () => {
     const firstState = createState();
     const secondState = createState();

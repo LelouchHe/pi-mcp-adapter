@@ -614,7 +614,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     for (const [serverName, value] of changes) {
       const definition = state.config.mcpServers[serverName];
       if (!definition) continue;
-      state.config.mcpServers[serverName] = { ...definition, directTools: value };
+      const updated = { ...definition, directTools: value };
+      state.config.mcpServers[serverName] = updated;
+      const runtimeServer = runtimeServers.get(serverName);
+      if (runtimeServer?.entry === definition) runtimeServer.entry = updated;
     }
   }
 
@@ -853,7 +856,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       directTools,
       ...(lifecycle !== undefined ? { lifecycle } : {}),
     };
-    runtimeServers.set(name, { definition: snapshotDefinition, entry });
+    const runtimeServer = { definition: snapshotDefinition, entry };
+    runtimeServers.set(name, runtimeServer);
     const registeredState = state;
     if (registeredState) {
       registeredState.config.mcpServers[name] = entry;
@@ -886,9 +890,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       dispose: async (): Promise<void> => {
         if (disposed) return;
         disposed = true;
+        if (runtimeServers.get(name) !== runtimeServer) return;
         runtimeServers.delete(name);
         const currentState = state;
-        if (!currentState || currentState.config.mcpServers[name] !== entry) {
+        if (!currentState || currentState.config.mcpServers[name] !== runtimeServer.entry) {
           cachedReportMetadata.delete(name);
           return;
         }
