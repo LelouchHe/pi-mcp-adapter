@@ -693,6 +693,49 @@ describe("runtime MCP server registration", () => {
     await replacement.dispose();
   });
 
+  it("does not delete new-session live metadata using an old runtime cache marker", async () => {
+    const firstState = createState();
+    const secondState = createState();
+    const liveDefinition = { url: "https://configured.test/mcp", lifecycle: "eager" as const };
+    secondState.config.mcpServers = { "plugin-shared": liveDefinition };
+    secondState.toolMetadata.set("plugin-shared", [
+      { name: "plugin-shared_current", originalName: "current", description: "Current", inputSchema: { type: "object" } },
+    ]);
+    mocks.initializeMcp.mockReset().mockResolvedValueOnce(firstState).mockResolvedValueOnce(secondState);
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-shared": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-shared_old", originalName: "old", description: "Old cached", inputSchema: { type: "object" } },
+    ]);
+
+    const { api, handlers } = createPi();
+    const { default: mcpAdapter, registerMcpServer } = await import("../index.ts");
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await settle();
+
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-shared",
+      definition: { url: "https://old.test/mcp", directTools: true },
+    });
+    await settle();
+    expect(firstState.toolMetadata.get("plugin-shared")).toEqual([
+      expect.objectContaining({ description: "Old cached" }),
+    ]);
+
+    // The next session now has a configured server with the same name; the
+    // runtime registration is skipped as shadowed, but its old cache marker must
+    // not delete the new state's already-discovered live metadata.
+    mocks.loadMcpConfig.mockReturnValue({ mcpServers: { "plugin-shared": liveDefinition } });
+    await handlers.get("session_start")?.({}, {});
+    await settle();
+
+    expect(secondState.toolMetadata.get("plugin-shared")).toEqual([
+      expect.objectContaining({ description: "Current" }),
+    ]);
+    await registration.dispose();
+  });
+
   it("drops cache-derived metadata when its cache entry expires", async () => {
     const { state, api, registerMcpServer } = await startInitializedSession();
     let cacheValid = true;
@@ -710,6 +753,13 @@ describe("runtime MCP server registration", () => {
     await settle();
     expect(state.toolMetadata.has("plugin-expiring")).toBe(true);
 
+    // Failure notifications keep the catalog cache-derived; later expiry must
+    // still invalidate it instead of treating it as live metadata.
+    expect(state.onToolMetadataUpdated).toEqual(expect.any(Function));
+    state.onToolMetadataUpdated("plugin-expiring", "failure-backoff-started");
+    await settle();
+    expect(state.toolMetadata.has("plugin-expiring")).toBe(true);
+
     cacheValid = false;
     const trigger = registerMcpServer({
       pi: api,
@@ -718,6 +768,45 @@ describe("runtime MCP server registration", () => {
     });
     await settle();
     expect(state.toolMetadata.has("plugin-expiring")).toBe(false);
+
+    await trigger.dispose();
+    await registration.dispose();
+  });
+
+  it("does not expire live metadata after it replaces a cache-derived catalog", async () => {
+    const { state, api, registerMcpServer } = await startInitializedSession();
+    let cacheValid = true;
+    mocks.isServerCacheValid.mockImplementation(() => cacheValid);
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-live-update": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-live-update_echo", originalName: "echo", description: "Cached", inputSchema: { type: "object" } },
+    ]);
+
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-live-update",
+      definition: { url: "https://live-update.test/mcp", directTools: true },
+    });
+    await settle();
+    expect(state.toolMetadata.get("plugin-live-update")).toEqual([
+      expect.objectContaining({ description: "Cached" }),
+    ]);
+
+    const liveMetadata = [
+      { name: "plugin-live-update_echo", originalName: "echo", description: "Live", inputSchema: { type: "object" } },
+    ];
+    state.toolMetadata.set("plugin-live-update", liveMetadata);
+    state.onToolMetadataUpdated("plugin-live-update", "lifecycle-reconnect");
+    await settle();
+
+    cacheValid = false;
+    const trigger = registerMcpServer({
+      pi: api,
+      name: "plugin-trigger-live",
+      definition: { url: "https://trigger-live.test/mcp" },
+    });
+    await settle();
+    expect(state.toolMetadata.get("plugin-live-update")).toEqual(liveMetadata);
 
     await trigger.dispose();
     await registration.dispose();

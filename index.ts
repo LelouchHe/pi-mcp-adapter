@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { McpExtensionState } from "./state.ts";
-import { isServerDisabled, type DirectToolSpec, type McpAdapterOptions, type McpConfig, type PromptMetadata, type ServerEntry } from "./types.ts";
+import { isServerDisabled, type DirectToolSpec, type McpAdapterOptions, type McpConfig, type PromptMetadata, type ServerEntry, type ToolMetadata } from "./types.ts";
 import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
@@ -385,7 +385,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   // Names whose in-memory report metadata was reconstructed from disk cache.
   // Track provenance so a disposed/replaced runtime registration or expired
   // cache entry cannot leave stale metadata masquerading as the new catalog.
-  const cachedReportMetadata = new Set<string>();
+  const cachedReportMetadata = new Map<string, ToolMetadata[]>();
 
   // Mirrors init's per-server lifecycle registration so runtime servers get
   // idle cleanup and keep-alive health recovery like configured servers.
@@ -643,7 +643,13 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   // live metadata on purpose, and a cached list there would offer the model tools
   // the server may no longer expose. Live metadata always wins.
   function reportCachedCatalog(targetState: McpExtensionState, cache: MetadataCache | null): void {
-    for (const name of cachedReportMetadata) {
+    for (const [name, cachedMetadata] of cachedReportMetadata) {
+      const currentMetadata = targetState.toolMetadata.get(name);
+      if (currentMetadata !== cachedMetadata) {
+        // A live update or a replacement session owns the current value now.
+        cachedReportMetadata.delete(name);
+        continue;
+      }
       const definition = targetState.config.mcpServers[name];
       const entry = cache?.servers[name];
       if (
@@ -669,11 +675,9 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       if (!promotesNativeDirectTools(definition.directTools)) continue;
       if (targetState.toolMetadata.has(name)) continue;
       if (!isServerCacheValid(entry, definition)) continue;
-      targetState.toolMetadata.set(
-        name,
-        reconstructToolMetadata(name, entry, prefix, definition, targetState.config.mcpServers, cache),
-      );
-      cachedReportMetadata.add(name);
+      const metadata = reconstructToolMetadata(name, entry, prefix, definition, targetState.config.mcpServers, cache);
+      targetState.toolMetadata.set(name, metadata);
+      cachedReportMetadata.set(name, metadata);
       if (Array.isArray(entry.resources)) {
         (targetState.resourceCounts ??= new Map()).set(name, entry.resources.length);
       }
@@ -1056,8 +1060,12 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         guard();
         nextState.onToolMetadataUpdated = (_serverName, _reason) => {
           if (state !== nextState || !owner.isActive()) return;
-          // A live metadata publication replaces any cache-derived report entry.
-          cachedReportMetadata.delete(_serverName);
+          // Drop cache provenance only when the current catalog is a different
+          // object from the one reconstructed from disk. Failure notifications
+          // can arrive with the same cached catalog and must not bless it as live.
+          if (cachedReportMetadata.get(_serverName) !== nextState.toolMetadata.get(_serverName)) {
+            cachedReportMetadata.delete(_serverName);
+          }
           syncPromptCommands();
           if (directToolsFrozen) {
             logger.debug(`MCP: metadata update for ${_serverName} (${_reason}) skipped — directTools frozen`);
