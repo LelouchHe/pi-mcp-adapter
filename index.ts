@@ -382,6 +382,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   // Session/runtime scoped server registrations from other extensions. They
   // survive session restarts within this install and die with the process.
   const runtimeServers = new Map<string, { definition: ServerEntry; entry: ServerEntry }>();
+  // Names whose in-memory report metadata was reconstructed from disk cache.
+  // Track provenance so a disposed/replaced runtime registration or expired
+  // cache entry cannot leave stale metadata masquerading as the new catalog.
+  const cachedReportMetadata = new Set<string>();
 
   // Mirrors init's per-server lifecycle registration so runtime servers get
   // idle cleanup and keep-alive health recovery like configured servers.
@@ -639,6 +643,23 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   // live metadata on purpose, and a cached list there would offer the model tools
   // the server may no longer expose. Live metadata always wins.
   function reportCachedCatalog(targetState: McpExtensionState, cache: MetadataCache | null): void {
+    for (const name of cachedReportMetadata) {
+      const definition = targetState.config.mcpServers[name];
+      const entry = cache?.servers[name];
+      if (
+        !runtimeServers.has(name)
+        || !definition
+        || isServerDisabled(definition)
+        || !promotesNativeDirectTools(definition.directTools)
+        || !entry
+        || !isServerCacheValid(entry, definition)
+      ) {
+        cachedReportMetadata.delete(name);
+        targetState.toolMetadata.delete(name);
+        targetState.resourceCounts?.delete(name);
+      }
+    }
+
     if (!cache) return;
     const prefix = targetState.config.settings?.toolPrefix ?? "server";
     for (const [name, entry] of Object.entries(cache.servers)) {
@@ -652,6 +673,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         name,
         reconstructToolMetadata(name, entry, prefix, definition, targetState.config.mcpServers, cache),
       );
+      cachedReportMetadata.add(name);
       if (Array.isArray(entry.resources)) {
         (targetState.resourceCounts ??= new Map()).set(name, entry.resources.length);
       }
@@ -859,7 +881,16 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         disposed = true;
         runtimeServers.delete(name);
         const currentState = state;
-        if (!currentState || currentState.config.mcpServers[name] !== entry) return;
+        if (!currentState || currentState.config.mcpServers[name] !== entry) {
+          cachedReportMetadata.delete(name);
+          return;
+        }
+        cachedReportMetadata.delete(name);
+        currentState.toolMetadata.delete(name);
+        currentState.resourceCounts?.delete(name);
+        currentState.promptMetadata?.delete(name);
+        currentState.promptMetadataLive?.delete(name);
+        currentState.serverInstructions?.delete(name);
         delete currentState.config.mcpServers[name];
         currentState.lifecycle.unregisterServer(name);
         const guard = captureRuntimeGuard(currentState);
@@ -1025,6 +1056,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         guard();
         nextState.onToolMetadataUpdated = (_serverName, _reason) => {
           if (state !== nextState || !owner.isActive()) return;
+          // A live metadata publication replaces any cache-derived report entry.
+          cachedReportMetadata.delete(_serverName);
           syncPromptCommands();
           if (directToolsFrozen) {
             logger.debug(`MCP: metadata update for ${_serverName} (${_reason}) skipped — directTools frozen`);

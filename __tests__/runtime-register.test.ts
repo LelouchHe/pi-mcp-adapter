@@ -603,6 +603,126 @@ describe("runtime MCP server registration", () => {
     await registration.dispose();
   });
 
+  it("clears a cached runtime catalog when the registration is disposed before replacement", async () => {
+    const { state, api, registerMcpServer } = await startInitializedSession();
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-reused": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-reused_echo", originalName: "echo", description: "Old", inputSchema: { type: "object" } },
+    ]);
+
+    const original = registerMcpServer({
+      pi: api,
+      name: "plugin-reused",
+      definition: { url: "https://old.test/mcp", directTools: true },
+    });
+    await settle();
+    expect(state.toolMetadata.get("plugin-reused")).toEqual([
+      expect.objectContaining({ description: "Old" }),
+    ]);
+
+    await original.dispose();
+    expect(state.toolMetadata.has("plugin-reused")).toBe(false);
+
+    const replacement = registerMcpServer({
+      pi: api,
+      name: "plugin-reused",
+      definition: { url: "https://new.test/mcp", directTools: "search" },
+    });
+    await settle();
+    expect(state.toolMetadata.has("plugin-reused")).toBe(false);
+    await replacement.dispose();
+  });
+
+  it("drops cached runtime metadata after the cache entry expires", async () => {
+    const { state, api, registerMcpServer } = await startInitializedSession();
+    let cacheValid = true;
+    mocks.isServerCacheValid.mockImplementation(() => cacheValid);
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-expiring": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-expiring_echo", originalName: "echo", description: "Cached", inputSchema: { type: "object" } },
+    ]);
+
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-expiring",
+      definition: { url: "https://expiring.test/mcp", directTools: true },
+    });
+    await settle();
+    expect(state.toolMetadata.has("plugin-expiring")).toBe(true);
+
+    cacheValid = false;
+    const trigger = registerMcpServer({
+      pi: api,
+      name: "plugin-trigger",
+      definition: { url: "https://trigger.test/mcp" },
+    });
+    await settle();
+    expect(state.toolMetadata.has("plugin-expiring")).toBe(false);
+
+    await trigger.dispose();
+    await registration.dispose();
+  });
+
+  it("clears cache-derived metadata when a runtime server is disposed and replaced", async () => {
+    const { state, api, registerMcpServer } = await startInitializedSession();
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-reused": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-reused_echo", originalName: "echo", description: "Old", inputSchema: { type: "object" } },
+    ]);
+
+    const original = registerMcpServer({
+      pi: api,
+      name: "plugin-reused",
+      definition: { url: "https://old.test/mcp", directTools: true },
+    });
+    await settle();
+    expect(state.toolMetadata.get("plugin-reused")).toEqual([
+      expect.objectContaining({ description: "Old" }),
+    ]);
+
+    await original.dispose();
+    expect(state.toolMetadata.has("plugin-reused")).toBe(false);
+
+    const replacement = registerMcpServer({
+      pi: api,
+      name: "plugin-reused",
+      definition: { url: "https://new.test/mcp", directTools: "search" },
+    });
+    await settle();
+    expect(state.toolMetadata.has("plugin-reused")).toBe(false);
+    await replacement.dispose();
+  });
+
+  it("drops cache-derived metadata when its cache entry expires", async () => {
+    const { state, api, registerMcpServer } = await startInitializedSession();
+    let cacheValid = true;
+    mocks.isServerCacheValid.mockImplementation(() => cacheValid);
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-expiring": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-expiring_echo", originalName: "echo", description: "Cached", inputSchema: { type: "object" } },
+    ]);
+
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-expiring",
+      definition: { url: "https://expiring.test/mcp", directTools: true },
+    });
+    await settle();
+    expect(state.toolMetadata.has("plugin-expiring")).toBe(true);
+
+    cacheValid = false;
+    const trigger = registerMcpServer({
+      pi: api,
+      name: "plugin-trigger",
+      definition: { url: "https://trigger.test/mcp" },
+    });
+    await settle();
+    expect(state.toolMetadata.has("plugin-expiring")).toBe(false);
+
+    await trigger.dispose();
+    await registration.dispose();
+  });
+
   it("keeps the cached catalog out of a search-mode-only runtime registration", async () => {
     const { state, api, registerMcpServer } = await startInitializedSession();
     mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-search": CACHED_ENTRY } });
