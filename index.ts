@@ -642,7 +642,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   // surface the server is actually serving. `"search"` mode is excluded: it reads
   // live metadata on purpose, and a cached list there would offer the model tools
   // the server may no longer expose. Live metadata always wins.
-  function reportCachedCatalog(targetState: McpExtensionState, cache: MetadataCache | null): void {
+  function pruneCachedReportMetadata(targetState: McpExtensionState, cache: MetadataCache | null): void {
     for (const [name, cachedMetadata] of cachedReportMetadata) {
       const currentMetadata = targetState.toolMetadata.get(name);
       if (currentMetadata !== cachedMetadata) {
@@ -665,7 +665,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         targetState.resourceCounts?.delete(name);
       }
     }
+  }
 
+  function reportCachedCatalog(targetState: McpExtensionState, cache: MetadataCache | null): void {
+    pruneCachedReportMetadata(targetState, cache);
     if (!cache) return;
     const prefix = targetState.config.settings?.toolPrefix ?? "server";
     for (const [name, entry] of Object.entries(cache.servers)) {
@@ -1068,6 +1071,9 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           }
           syncPromptCommands();
           if (directToolsFrozen) {
+            // Frozen native tools do not rebuild, but cached report metadata still
+            // needs hash/TTL/disposal validation when backoff notifications arrive.
+            pruneCachedReportMetadata(nextState, loadToolSurfaceCache(nextState.config));
             logger.debug(`MCP: metadata update for ${_serverName} (${_reason}) skipped — directTools frozen`);
             return;
           }

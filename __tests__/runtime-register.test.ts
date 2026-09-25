@@ -736,6 +736,39 @@ describe("runtime MCP server registration", () => {
     await registration.dispose();
   });
 
+  it("expires cached report metadata on failure notifications while direct tools are frozen", async () => {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    mocks.loadMcpConfig.mockReturnValue({ settings: { freezeDirectTools: true }, mcpServers: {} });
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-frozen": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-frozen_echo", originalName: "echo", description: "Cached", inputSchema: { type: "object" } },
+    ]);
+    let cacheValid = true;
+    mocks.isServerCacheValid.mockImplementation(() => cacheValid);
+
+    const { default: mcpAdapter, registerMcpServer } = await import("../index.ts");
+    const { api, handlers } = createPi();
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await settle();
+
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-frozen",
+      definition: { url: "https://frozen.test/mcp", directTools: true },
+    });
+    await settle();
+    expect(state.toolMetadata.has("plugin-frozen")).toBe(true);
+
+    cacheValid = false;
+    state.onToolMetadataUpdated?.("plugin-frozen", "failure-backoff-started");
+    await settle();
+    expect(state.toolMetadata.has("plugin-frozen")).toBe(false);
+
+    await registration.dispose();
+  });
+
   it("drops cache-derived metadata when its cache entry expires", async () => {
     const { state, api, registerMcpServer } = await startInitializedSession();
     let cacheValid = true;
