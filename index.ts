@@ -658,6 +658,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     }
   }
 
+  // Set while a session start has deferred initialization, so the first runtime
+  // registration that needs the adapter can wake it instead.
+  let deferredContext: ExtensionContext | undefined;
+
   function syncToolSurface(ctx?: ExtensionContext): void {
     const notificationGeneration = lifecycleGeneration;
     const notificationOwner = currentOwner;
@@ -837,6 +841,16 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             logger.debug(`MCP: could not update status after runtime registration: ${formatTerminalError(error)}`);
           }
         });
+    } else if (deferredContext) {
+      // This registration is the first thing that needs the adapter, so wake the
+      // deferred session runtime instead of waiting for the first adapter tool
+      // call. Otherwise a runtime-only install stays uninitialized — no catalog,
+      // no auto-connect, and no native tools — until something else asks for it.
+      const ctx = deferredContext;
+      deferredContext = undefined;
+      void ensureSessionRuntime(ctx).catch(error => {
+        console.error(`MCP: deferred initialization failed after a runtime registration: ${formatTerminalError(error)}`);
+      });
     }
     let disposed = false;
     return {
@@ -1106,6 +1120,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   }
 
   function ensureSessionRuntime(ctx: ExtensionContext): Promise<McpExtensionState | null> {
+    deferredContext = undefined;
     if (state) return Promise.resolve(state);
     if (initPromise) return initPromise;
     const owner = currentOwner?.isActive() ? currentOwner : createMcpRuntimeOwner();
@@ -1186,6 +1201,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     if (!initPromise) {
       const deferredSnapshot = getDeferredSessionSnapshot(ctx.cwd);
       if (deferredSnapshot) {
+        deferredContext = ctx;
         const { config, cache, enabledServerCount } = deferredSnapshot;
         const directResult = syncDirectTools(config, cache);
         syncProxyTool(config, cache, directResult.specs);
@@ -1273,6 +1289,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   });
 
   pi.on("session_shutdown", async () => {
+    deferredContext = undefined;
     ++lifecycleGeneration;
     const currentState = state;
     const owner = currentOwner;

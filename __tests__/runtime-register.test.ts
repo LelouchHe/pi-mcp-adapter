@@ -545,6 +545,33 @@ describe("runtime MCP server registration", () => {
     return { state, api, registerMcpServer };
   }
 
+  it("wakes deferred initialization when a runtime server registers", async () => {
+    mocks.loadMetadataCache.mockReturnValue({
+      version: 1,
+      servers: { "plugin-cached": { configHash: "hash", tools: [{ name: "echo" }], resources: [] } },
+    });
+    const { api, handlers } = createPi();
+    const { default: mcpAdapter, registerMcpServer } = await import("../index.ts");
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, { hasUI: false });
+    await settle();
+
+    // A cache-backed install with no configured servers defers initialization,
+    // because deferring waits for live metadata of configured servers.
+    expect(mocks.initializeMcp).not.toHaveBeenCalled();
+
+    // A runtime registration is the first thing that needs the adapter, so it is
+    // what wakes the deferred runtime rather than a later adapter tool call.
+    registerMcpServer({
+      pi: api,
+      name: "plugin-cached",
+      definition: { url: "https://cached.test/mcp", directTools: true },
+    });
+    await settle();
+
+    expect(mocks.initializeMcp).toHaveBeenCalled();
+  });
+
   it("reports the cached catalog for an opt-in registration with no live session", async () => {
     const { state, api, registerMcpServer } = await startInitializedSession();
     mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-cached": CACHED_ENTRY } });
