@@ -10,7 +10,7 @@ import type { TSchema } from "typebox";
 import { cloneMcpConfig, discoverConfiguredClaudePluginSkills, getPiGlobalConfigPath, getProjectConfigPath, loadMcpConfig, resolveConfiguredClaudePluginMcp, writeProjectServerDisabledOverride, writeSharedServerEntry } from "./config.ts";
 import { buildProxyDescription, getLargeDirectToolsAdvisory, getMissingConfiguredDirectToolServers, prepareDirectToolArguments, resolveDirectTools } from "./direct-tool-surface.ts";
 import { isServerInActiveFailureBackoff } from "./failure-backoff.ts";
-import { computeServerHash, isServerCacheValid, loadMetadataCache, parseDirectToolSelectors, type MetadataCache } from "./metadata-cache.ts";
+import { computeServerHash, isServerCacheValid, loadMetadataCache, parseDirectToolSelectors, reconstructToolMetadata, type MetadataCache } from "./metadata-cache.ts";
 import { createPromptCommand, resolveCachedPrompts } from "./prompts.ts";
 import { logger } from "./logger.ts";
 import { formatMcpFooterStatus, formatTerminalError, getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
@@ -632,11 +632,38 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     return { ...cache, servers };
   }
 
+  // A runtime registration the fork promoted into Pi's native surface keeps its
+  // cached catalog on display while no live session exists. Its native tools were
+  // built from that cache, so reporting zero tools for it would contradict the
+  // surface the server is actually serving. `"search"` mode is excluded: it reads
+  // live metadata on purpose, and a cached list there would offer the model tools
+  // the server may no longer expose. Live metadata always wins.
+  function reportCachedCatalog(targetState: McpExtensionState, cache: MetadataCache | null): void {
+    if (!cache) return;
+    const prefix = targetState.config.settings?.toolPrefix ?? "server";
+    for (const [name, entry] of Object.entries(cache.servers)) {
+      if (!runtimeServers.has(name)) continue;
+      const definition = targetState.config.mcpServers[name];
+      if (!definition || isServerDisabled(definition)) continue;
+      if (!promotesNativeDirectTools(definition.directTools)) continue;
+      if (targetState.toolMetadata.has(name)) continue;
+      if (!isServerCacheValid(entry, definition)) continue;
+      targetState.toolMetadata.set(
+        name,
+        reconstructToolMetadata(name, entry, prefix, definition, targetState.config.mcpServers, cache),
+      );
+      if (Array.isArray(entry.resources)) {
+        (targetState.resourceCounts ??= new Map()).set(name, entry.resources.length);
+      }
+    }
+  }
+
   function syncToolSurface(ctx?: ExtensionContext): void {
     const notificationGeneration = lifecycleGeneration;
     const notificationOwner = currentOwner;
     const config = state?.config ?? earlyConfig;
     const cache = loadToolSurfaceCache(config);
+    if (state) reportCachedCatalog(state, cache);
     const result = syncDirectTools(config, cache);
     if (state) {
       const directToolCounts = state.directToolCounts ?? new Map<string, number>();

@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   discoverConfiguredClaudePluginSkills: vi.fn(() => []),
   resolveConfiguredClaudePluginMcp: vi.fn((config: unknown) => structuredClone(config)),
   loadMetadataCache: vi.fn(() => null),
+  isServerCacheValid: vi.fn(() => true),
+  reconstructToolMetadata: vi.fn(() => []),
   buildProxyDescription: vi.fn(() => "MCP gateway"),
   createDirectToolExecutor: vi.fn(() => vi.fn()),
   getMissingConfiguredDirectToolServers: vi.fn(() => []),
@@ -69,6 +71,8 @@ vi.mock("../config.ts", () => ({
 
 vi.mock("../metadata-cache.ts", () => ({
   loadMetadataCache: mocks.loadMetadataCache,
+  isServerCacheValid: mocks.isServerCacheValid,
+  reconstructToolMetadata: mocks.reconstructToolMetadata,
 }));
 
 vi.mock("../direct-tool-surface.ts", () => ({
@@ -111,6 +115,7 @@ vi.mock("../proxy-modes.ts", () => ({
 }));
 
 vi.mock("../utils.ts", () => ({
+  formatMcpFooterStatus: () => "MCP",
   formatTerminalError: (error: unknown) => error instanceof Error ? error.message : String(error),
   getConfigPathFromArgv: mocks.getConfigPathFromArgv,
   normalizeDirectToolInputSchema: mocks.normalizeDirectToolInputSchema,
@@ -200,6 +205,8 @@ describe("runtime MCP server registration", () => {
     mocks.loadMcpConfig.mockReturnValue({ mcpServers: {} });
     mocks.cloneMcpConfig.mockImplementation((config: unknown) => structuredClone(config));
     mocks.loadMetadataCache.mockReturnValue(null);
+    mocks.isServerCacheValid.mockReturnValue(true);
+    mocks.reconstructToolMetadata.mockReturnValue([]);
     mocks.buildProxyDescription.mockReturnValue("MCP gateway");
     mocks.createDirectToolExecutor.mockReturnValue(vi.fn());
     mocks.getMissingConfiguredDirectToolServers.mockReturnValue([]);
@@ -519,6 +526,97 @@ describe("runtime MCP server registration", () => {
     );
 
     await registration.dispose();
+  });
+
+  // A non-null metadata cache makes the adapter take its deferred-session path,
+  // so every case here starts with the cache absent (real initialization) and
+  // only then installs the cached catalog the registration should report.
+  const CACHED_ENTRY = { configHash: "hash", tools: [{ name: "echo", description: "Echo" }], resources: [] };
+
+  async function startInitializedSession() {
+    const state = createState();
+    mocks.initializeMcp.mockResolvedValue(state);
+    const { api, handlers } = createPi();
+    const { default: mcpAdapter, registerMcpServer } = await import("../index.ts");
+    mcpAdapter(api);
+    await handlers.get("session_start")?.({}, {});
+    await settle();
+    expect(mocks.initializeMcp).toHaveBeenCalled();
+    return { state, api, registerMcpServer };
+  }
+
+  it("reports the cached catalog for an opt-in registration with no live session", async () => {
+    const { state, api, registerMcpServer } = await startInitializedSession();
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-cached": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-cached_echo", originalName: "echo", description: "Echo", inputSchema: { type: "object" } },
+    ]);
+
+    const registration = registerMcpServer({
+      pi: api,
+      name: "plugin-cached",
+      definition: { url: "https://cached.test/mcp", directTools: true },
+    });
+    await settle();
+
+    // The native tools for this server come from the cache, so the reported
+    // catalog has to come from the same place until a live refresh replaces it.
+    expect(mocks.reconstructToolMetadata).toHaveBeenCalledWith(
+      "plugin-cached",
+      expect.objectContaining({ configHash: "hash" }),
+      "server",
+      expect.objectContaining({ url: "https://cached.test/mcp" }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(state.toolMetadata.get("plugin-cached")).toEqual([
+      expect.objectContaining({ name: "plugin-cached_echo" }),
+    ]);
+
+    await registration.dispose();
+  });
+
+  it("keeps the cached catalog out of a search-mode-only runtime registration", async () => {
+    const { state, api, registerMcpServer } = await startInitializedSession();
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-search": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-search_echo", originalName: "echo", description: "Echo", inputSchema: { type: "object" } },
+    ]);
+
+    registerMcpServer({
+      pi: api,
+      name: "plugin-search",
+      definition: { url: "https://search.test/mcp", directTools: "search" },
+    });
+    await settle();
+
+    // Search mode reads live metadata on purpose, so a cached list must not be
+    // presented as the server's catalog.
+    expect(mocks.reconstructToolMetadata).not.toHaveBeenCalled();
+    expect(state.toolMetadata.has("plugin-search")).toBe(false);
+  });
+
+  it("prefers live metadata over the cached catalog", async () => {
+    const { state, api, registerMcpServer } = await startInitializedSession();
+    state.toolMetadata.set("plugin-live", [
+      { name: "plugin-live_echo", originalName: "echo", description: "Live", inputSchema: { type: "object" } },
+    ]);
+    mocks.loadMetadataCache.mockReturnValue({ version: 1, servers: { "plugin-live": CACHED_ENTRY } });
+    mocks.reconstructToolMetadata.mockReturnValue([
+      { name: "plugin-live_echo", originalName: "echo", description: "Stale", inputSchema: { type: "object" } },
+    ]);
+
+    registerMcpServer({
+      pi: api,
+      name: "plugin-live",
+      definition: { url: "https://live.test/mcp", directTools: true },
+    });
+    await settle();
+
+    expect(mocks.reconstructToolMetadata).not.toHaveBeenCalled();
+    expect(state.toolMetadata.get("plugin-live")).toEqual([
+      expect.objectContaining({ description: "Live" }),
+    ]);
   });
 
   it("fails closed on duplicate names against config and other registrations", async () => {
