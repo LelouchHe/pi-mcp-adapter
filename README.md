@@ -261,7 +261,7 @@ export default function pluginHost(pi) {
 
 Cross-extension registration uses Pi's shared event bus and does not require a runtime import from `pi-mcp-adapter`. Emit during `session_start` or later so the adapter listener is installed. The adapter writes `request.result` synchronously; the first adapter listener to respond wins.
 
-Runtime registrations are session scoped and never written to config files. Duplicate server names fail closed against configured servers and other registrations. Registered servers use the normal lazy connection, OAuth, approval, and shutdown behavior, but they are proxy-tool-only and their tools become visible at the next tool sync. To change a definition, dispose the registration and register again.
+Runtime registrations are session scoped and never written to config files. Duplicate server names fail closed against configured servers and other registrations. By default, they remain proxy-tool-only and use the lazy lifecycle. Set `directTools: true` or a non-empty tool-name list to promote tools into Pi's native surface; this opts into an automatic catalog connection and defaults to `lazy-keep-alive` unless `lifecycle` is specified explicitly. `directTools: "search"` keeps tools out of the native surface for `mcp({ search })`; its lifecycle stays lazy by default. To change a definition, dispose the registration and register again.
 
 ### SDK configuration
 

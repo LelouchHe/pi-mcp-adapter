@@ -2201,9 +2201,11 @@ export function createMcpAdapter(options: McpAdapterOptions = {}) {
 /**
  * Register an MCP server with the adapter installed for this Pi instance.
  * Registrations are session/runtime scoped and never persisted. Duplicate
- * names fail closed. Registered servers are proxy-tool-only; their tools
- * become visible at the next tool sync. To change a definition, dispose the
- * registration and register again.
+ * names fail closed. Native tool promotion is opt-in with `directTools: true`
+ * or a non-empty tool-name list; those registrations auto-connect and default
+ * to `lazy-keep-alive` unless `lifecycle` is set explicitly. `directTools:
+ * "search"` keeps tools out of the native surface. To change a definition,
+ * dispose the registration and register again.
  */
 export function registerMcpServer(options: { pi: ExtensionAPI; name: string; definition: ServerEntry }): McpServerRegistration {
   const { pi, name, definition } = options;
