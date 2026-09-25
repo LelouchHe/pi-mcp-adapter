@@ -14,11 +14,13 @@ const runtimeProbePath = process.env.MCP_CHILD_RUNTIME_PROBE_PATH;
 if (!agentDir || !configPath || !projectDir || !adapterPath) {
   throw new Error("Missing direct-tool child harness environment");
 }
-const extensionPaths = [
-  adapterPath,
+const probePaths = [
   ...(probePath ? [probePath] : []),
   ...(runtimeProbePath ? [runtimeProbePath] : []),
 ];
+const extensionPaths = process.env.MCP_CHILD_RUNTIME_PROBE_FIRST === "1"
+  ? [...probePaths, adapterPath]
+  : [adapterPath, ...probePaths];
 const tools = (process.env.MCP_CHILD_TOOLS ?? "demo_reload_identity")
   .split(",")
   .map(name => name.trim())

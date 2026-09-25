@@ -116,6 +116,26 @@ describe("runtime MCP registration in a child Pi process", () => {
     expect(await spawnCount(join(root, "late"))).toBeGreaterThan(0);
   });
 
+  it("wakes cache-deferred startup when runtime registration arrives before adapter session_start", async () => {
+    const root = await createRoot(["deferred"]);
+    await mkdir(join(root, "agent"), { recursive: true });
+    await writeFile(join(root, "agent", "mcp-cache.json"), JSON.stringify({ version: 1, servers: {} }));
+
+    const { stdout, stderr } = await runChild(root, {
+      MCP_CHILD_TOOLS: "runtimefx_reload_identity",
+      MCP_CHILD_RUNTIME_WAIT_MS: "1500",
+      MCP_CHILD_RUNTIME_PROBE_FIRST: "1",
+      MCP_CHILD_RUNTIME_SERVERS: JSON.stringify([
+        runtimeServer("runtimefx", { pidDir: join(root, "deferred"), directTools: true }),
+      ]),
+    });
+
+    expect(stderr).not.toContain("MCP initialization failed");
+    expect(registrationOutcome(stdout)).toEqual({ names: ["runtimefx"], rejected: [] });
+    expect(readLines(stdout, "RUNTIME_TOOLS_READY")).toEqual([{ runtimefx_reload_identity: true }]);
+    expect(await spawnCount(join(root, "deferred"))).toBeGreaterThan(0);
+  });
+
   it("leaves a runtime registration without direct-tool opt-in proxy-only", async () => {
     const root = await createRoot(["noopt"]);
     const { stdout, stderr } = await runChild(root, {

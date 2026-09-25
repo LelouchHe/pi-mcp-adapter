@@ -1180,6 +1180,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     state = null;
     initPromise = null;
     initStartedPromise = null;
+    deferredContext = undefined;
     clearRetainedInitFailure();
 
     // Abort synchronously before awaiting cleanup so old callbacks and startup
@@ -1199,7 +1200,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     if (state) return;
 
     if (!initPromise) {
-      const deferredSnapshot = getDeferredSessionSnapshot(ctx.cwd);
+      // A bridge/runtime registration may have run its session_start handler
+      // before ours. In that order it cannot wake a deferred context yet, so do
+      // not defer initialization when runtime registrations are already queued.
+      const deferredSnapshot = runtimeServers.size === 0 ? getDeferredSessionSnapshot(ctx.cwd) : undefined;
       if (deferredSnapshot) {
         deferredContext = ctx;
         const { config, cache, enabledServerCount } = deferredSnapshot;
