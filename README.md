@@ -1,40 +1,4 @@
-# Changes in this fork
-
-This fork is maintained at [`LelouchHe/pi-mcp-adapter`](https://github.com/LelouchHe/pi-mcp-adapter), based on the upstream [`nicobailon/pi-mcp-adapter`](https://github.com/nicobailon/pi-mcp-adapter). It adds behavior needed by session-scoped ACP integrations such as WebAgent:
-
-- Runtime-registered MCP servers remain proxy-only by default, preserving upstream behavior, but an explicit `directTools: true`, `directTools: "search"`, or non-empty `directTools` tool-name list is preserved and promoted into Pi's native tool surface. Search mode counts as an opt-in because its tools only become reachable through `mcp({ search })`, which reads live metadata.
-- Runtime registrations that opt into direct tools automatically connect through the existing lazy-connect and metadata-refresh path. The server runs `tools/list`, updates the metadata cache, and hot-loads direct tools without requiring the user or agent to run `/mcp reconnect`.
-- A runtime registration that promotes tools into Pi's native surface (`directTools: true` or a non-empty tool-name list) keeps its session ready by default: it is never idle-closed, and after its first connect it is covered by the keep-alive health checks. `directTools: "search"` deliberately keeps its tools out of that surface, so it stays lazy, and an explicit `lifecycle` still overrides the default.
-- The adapter wires and starts its lifecycle loop even when the configuration declares no MCP servers, so an installation whose every server arrives through runtime registration still gets idle cleanup, keep-alive recovery, and metadata republication after a reconnect. Previously that path returned before wiring the loop, which left such a server with none of the three — a recovered session reported zero tools and nothing resynced the native surface.
-- A runtime registration that promotes tools into Pi's native surface reports the catalog cached from its last successful connection while no live session exists. Its native tools are built from that cache, so reporting zero tools would contradict the tool surface the server is serving; the status reads `N tools, cached; not listening` until a live refresh replaces it. `directTools: "search"` registrations are excluded because that mode reads live metadata on purpose, and live metadata always wins.
-- A runtime registration wakes a deferred adapter. Upstream defers initialization at session start while a metadata cache is present, intending to wait for live metadata of configured servers; an installation with no configured servers would therefore stay uninitialized — no catalog, no auto-connect, and no native tools — until the first adapter tool call. The fork starts the deferred runtime when a registration arrives, whether the bridge registers before or after the adapter's session-start handler.
-- The automatic connection applies both when a runtime registration arrives after adapter initialization and when it was queued before initialization completes. Ordinary runtime registrations without direct-tool opt-in remain lazy.
-- `__tests__/runtime-register-child.test.ts` covers this in a real child Pi process against a real stdio server, driving the same `pi-mcp-adapter:runtime-register:v1` event contract that pi-acp's ACP MCP bridge uses. It asserts an invocable tool for opt-in registrations at session start, later in the session, and while initialization is still running, and asserts that a registration without opt-in never starts its server.
-- The public-export test accepts both the array-shaped `npm pack --json` output used by older npm releases and the package-keyed object shape emitted by npm 12.
-- Aborted elicitation and bearer-command cancellation tests, along with request-header helper cleanup tests, synchronize on the prompt and process-exit conditions instead of fixed scheduling windows, avoiding intermittent failures under suite contention; these upstream test files now intentionally diverge from upstream.
-- The interactive visualizer example includes a committed dependency lockfile so its standalone build and generated test fixtures can be reproduced with the declared npm dependencies. Build outputs and installed modules remain ignored.
-
-These changes are intentionally kept in the adapter fork rather than the WebAgent repository. The WebAgent/pi-acp integration passes the direct-tool opt-in through the ACP session MCP definition; this adapter is responsible for connecting and materializing the resulting Pi tools.
-
-### Installing this fork
-
-This fork is not published to npm, so install it from a checkout:
-
-```bash
-git clone https://github.com/LelouchHe/pi-mcp-adapter.git
-cd pi-mcp-adapter
-npm ci
-```
-
-`npm ci` resolves the MCP SDK preview builds that upstream pins to `pkg.pr.new`; because npm 12 blocks URL dependencies by default, this fork checks in an `.npmrc` that grants `allow-remote`. Nothing else is relaxed — install-time lifecycle scripts stay blocked and git sources stay disabled.
-
-Register the checkout with Pi instead of installing the published package:
-
-```bash
-pi install /absolute/path/to/pi-mcp-adapter
-```
-
-Pi resolves a local path in place and does not install dependencies for it, so the checkout's `node_modules` must stay where it is. The `## Install` section further down documents upstream's published package, which does not include the behavior listed above.
+> **Archived fork.** Pi 0.99.0 added built-in MCP support, including `pi.registerMcpServer()`, `mcp.json`, codemode, and tool search. This fork existed only so session-scoped MCP servers from ACP (via pi-acp) could expose direct tools and auto-connect. pi-acp now registers those servers with Pi's built-in MCP, so this fork is no longer used or maintained. For the adapter, see upstream [`nicobailon/pi-mcp-adapter`](https://github.com/nicobailon/pi-mcp-adapter); for the replacement, see [`LelouchHe/pi-acp`](https://github.com/LelouchHe/pi-acp). Installing pi-mcp-adapter disables Pi's built-in MCP support.
 
 <p>
   <img src="banner.png" alt="pi-mcp-adapter" width="1100">
